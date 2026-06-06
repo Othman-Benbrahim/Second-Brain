@@ -127,11 +127,12 @@ Tout le frontend (HTML + CSS + JS + D3.js + marked.js) tient dans un seul fichie
 
 ## 🛣 Roadmap
 
-- [ ] Mode hors-ligne avec modèle local par défaut
+- [ ] Agent de recherche arXiv (étude d'une alternative pour les matières non représentées en cours)
+- [ ] Moteur de recherche (duckduckgo) contextuel + Analyse et synthèse des flux RSS.
+- [ ] Intégrer la consultation des dossiers/fichiers par sélection arborescente
+- [ ] Compatibilité backlinks, avec le format skill (RAG) en markdown
 - [ ] Export multi-fichiers en PDF
-- [ ] Recherche sémantique vectorielle
 - [ ] Plugins / hooks utilisateur
-- [ ] Synchronisation Git intégrée
 
 ---
 
