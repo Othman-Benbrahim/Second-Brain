@@ -1,147 +1,142 @@
 # 🧠 Second Brain
 
-> Éditeur Markdown local style Obsidian, avec IA intégrée, carte mentale et graphe de connaissances — le tout dans deux fichiers.
+> Éditeur Markdown local avec IA intégrée, graphe de connaissances, et architecture à plugins.
+> Pensé pour un workflow de prise de notes profond, type Obsidian, mais sans cloud et avec l'IA directement dans l'éditeur.
 
-Une alternative locale, simple et hackable pour gérer son second cerveau, augmentée par n'importe quelle API OpenAI-compatible (OpenAI, FantasyAI, DeepSeek, Groq, Ollama…).
-
----
-
-## ✨ Fonctionnalités
-
-| | |
-|---|---|
-| **Éditeur Markdown** | 3 modes : édition · aperçu · scindé |
-| **Carte mentale** | Générée automatiquement depuis les titres `#` du fichier actif |
-| **Wikilinks** | `[[autre_fichier]]` cliquables en aperçu |
-| **Backlinks** | Toutes les notes qui pointent vers la note actuelle |
-| **Graphe de connaissances** | Vue force-directed de tout un dossier et de ses liens |
-| **Recherche full-text** | Récursive sur tous les `.md` du dossier (Ctrl+Shift+F) |
-| **Tags** | `#tag` extraits automatiquement, filtrage de l'explorateur |
-| **Renommage inline** | Double-clic sur un fichier |
-| **IA sur le fichier** | Améliorer, restructurer, résumer, développer, instruction libre |
-| **IA sur sélection** | Résultat dans un nouveau fichier auto-nommé |
-| **Synthèse de dossier** | Analyse globale de toutes les notes d'un dossier |
-| **Suggestions de liens** | L'IA propose où placer des `[[wikilinks]]` |
-
-Aucune base de données, aucun build, aucune dépendance npm. Vos notes restent des fichiers `.md` standard, compatibles Obsidian.
+![status](https://img.shields.io/badge/status-stable-green) ![python](https://img.shields.io/badge/python-3.10%2B-blue) ![licence](https://img.shields.io/badge/licence-voir%20LICENSE-lightgrey)
 
 ---
 
-## 🚀 Installation
+## ⚡ Démarrage rapide
 
 ```bash
-git clone https://github.com/<votre-nom>/second-brain.git
-cd second-brain
+git clone <ce-repo> secondbrain
+cd secondbrain
 pip install -r requirements.txt
 python second_brain.py
 ```
 
-L'interface s'ouvre automatiquement sur `http://localhost:5000`.
-
-> Sous Windows, utiliser `py` au lieu de `python` si nécessaire.
+Le navigateur s'ouvre sur `http://localhost:5000`. Première chose à faire : aller dans **⚙ Paramètres**, renseigner votre **clé API** (OpenRouter, Anthropic, ou tout endpoint OpenAI-compatible) et la **racine de votre vault** (dossier où vivront vos `.md`).
 
 ---
 
-## 🔧 Configuration
+## ✨ Ce que vous obtenez
 
-Au premier lancement, **⚙ Paramètres** :
+### 📝 Édition Markdown
 
-| Champ | Description |
-|-------|-------------|
-| **Clé API** | Votre clé pour le fournisseur choisi |
-| **Modèle** | `gpt-4o`, `claude-3-5-sonnet`, `deepseek-chat`… |
-| **URL API** | `https://api.openai.com/v1`, `https://fantasyai.cloud/api/v1`, etc. |
-| **Dossier de notes** | Chemin vers vos `.md` |
+- Trois modes : **✏️ Éditer** · **👁 Aperçu** · **⧉ Scindé** (côte à côte)
+- **Wikilinks** `[[fichier]]` cliquables avec auto-complétion
+- **Onglets** multi-fichiers avec indicateur de modification non sauvegardée
+- **Carte mentale** automatique (structure du fichier dans le panneau latéral)
+- **Recherche full-text** dans tout le vault (`Ctrl+Shift+F`)
+- **Graphe de connaissances** (toile d'araignée des liens entre vos fichiers, coloré par sous-dossier)
 
-Les paramètres sont stockés dans `~/.secondbrain/config.json` (hors du dépôt, jamais committé).
+### 🤖 IA intégrée
 
----
+- **Sur le fichier entier** : ✨ Améliorer · 🌿 Développer · 📋 Restructurer · 📄 Résumer
+- **Sur sélection** (sélectionnez du texte → une mini-toolbar apparaît) : ✨ Améliorer · ✂️ Raccourcir · 💡 Expliquer · 🌐 Traduire — **chaque action crée un nouveau fichier**, le source reste intact
+- **↶ Annuler IA** (`Ctrl+Alt+Z`) : annule la dernière modification destructive — un bouton orange pulsant apparaît automatiquement après chaque opération
+- **🔗 Liens IA** : l'IA propose des `[[wikilinks]]` cohérents pour votre fichier
 
-## 🔌 APIs supportées
+### 🔌 Architecture à plugins
 
-Toute API OpenAI-compatible exposant un endpoint `/chat/completions` :
+Cinq plugins inclus, tous chargés automatiquement au démarrage :
 
-- OpenAI
-- FantasyAI Cloud
-- DeepSeek
-- Groq
-- Ollama (local)
-- LM Studio (local)
-- OpenRouter
-- Anthropic via gateway compatible
+| Plugin | Bouton | Fonction |
+|---|---|---|
+| **ArXiv** | 🔬 ArXiv | Recherche scientifique agentique (l'IA formule la requête, fetch les abstracts, synthétise) |
+| **Context Builder** | 🗂 Multi-sélection | Construit un contexte multi-fichiers en suivant les wikilinks sur 1-5 niveaux |
+| **DuckDuckGo** | 🦆 DDG | Recherche web avec lecture du contenu complet des pages + synthèse IA |
+| **Prompts Manager** | 📝 Prompts | Gestionnaire de presets de prompts système réutilisables |
+| **RSS Feeds** | 🗞 RSS | Veille RSS/Atom avec auto-découverte des flux + analyse IA |
 
-Le parser gère à la fois les réponses JSON classiques et les flux SSE (streaming).
-
----
-
-## ⌨ Raccourcis
-
-| Touche | Action |
-|--------|--------|
-| `Ctrl+S` | Sauvegarder le fichier actif |
-| `Ctrl+Shift+F` | Recherche full-text |
-| `Double-clic` | Renommer un fichier |
-| `Échap` | Fermer modal / menu |
+→ Voir **[PLUGIN-DEVELOPMENT.md](./PLUGIN-DEVELOPMENT.md)** pour créer le vôtre.
 
 ---
 
-## 🏗 Architecture
+## 🗂 Structure du projet
 
 ```
-second-brain/
-├── second_brain.py     ← Backend Flask (~370 lignes)
-├── ui.html             ← Frontend complet (~1200 lignes)
-├── requirements.txt    ← flask, requests
-├── README.md
-├── LICENSE
-└── .gitignore
-```
-
-Tout le frontend (HTML + CSS + JS + D3.js + marked.js) tient dans un seul fichier statique chargé par Flask.
-
-**Stack technique** :
-
-| Composant | Rôle |
-|-----------|------|
-| Flask | Serveur HTTP local |
-| requests | Appels API IA |
-| D3.js 7 | Carte mentale, graphe force-directed |
-| marked.js | Rendu Markdown |
-
----
-
-## 📁 Structure des données
-
-```
-~/.secondbrain/                ← données utilisateur (jamais committées)
-  └── config.json              ← Clé API + préférences
-
-<votre dossier de notes>/      ← n'importe où sur votre disque
-  ├── note1.md
-  ├── projet/
-  │   └── note2.md
-  └── ...
+secondbrain/
+├── second_brain.py       # Cœur Flask : routes + plugin loader
+├── ui.html               # UI principale (HTML/CSS/JS en un seul fichier)
+├── requirements.txt      # flask, requests
+├── plugins/              # Plugins auto-découverts au démarrage
+│   ├── README.md         # Convention de développement (résumé)
+│   ├── arxiv/
+│   ├── context/
+│   ├── duckduckgo/
+│   ├── prompts/
+│   └── rss/
+├── PLUGIN-DEVELOPMENT.md # Guide complet pour créer un plugin
+└── README.md             # Ce fichier
 ```
 
 ---
 
-## 🛣 Roadmap
+## ⚙ Configuration
 
-- [ ] Agent de recherche arXiv (étude d'une alternative pour les matières non représentées en cours)
-- [ ] Moteur de recherche (duckduckgo) contextuel + Analyse et synthèse des flux RSS.
-- [ ] Intégrer la consultation des dossiers/fichiers par sélection arborescente
-- [ ] Compatibilité backlinks, avec le format skill (RAG) en markdown
-- [ ] Export multi-fichiers en PDF
-- [ ] Plugins / hooks utilisateur
+Tous les paramètres sont accessibles via **⚙ Paramètres** (icône engrenage en haut à droite), stockés dans `~/.secondbrain/config.json`.
+
+| Champ | Rôle |
+|---|---|
+| `workspace` | Racine du vault (dossier des `.md`) |
+| `api_key` | Clé API du fournisseur IA |
+| `api_url` | URL du endpoint (défaut : OpenRouter) |
+| `model` | Nom du modèle (ex: `anthropic/claude-3.5-sonnet`) |
+| `temperature` | Créativité de l'IA (0.0–1.0) |
+
+**Compatibilité API** : tout endpoint compatible OpenAI (OpenRouter, Anthropic direct, Mistral, Together, OpenAI, vLLM local, etc.).
 
 ---
 
-## 📄 Licence
+## ⌨ Raccourcis clavier
 
-MIT — voir [LICENSE](LICENSE).
+| Raccourci | Action |
+|---|---|
+| `Ctrl+S` | Sauvegarder le fichier courant |
+| `Ctrl+Shift+F` | Recherche full-text dans le vault |
+| `Ctrl+Alt+Z` | Annuler la dernière modification IA |
+| `Échap` | Fermer modal / panneau ouvert |
 
 ---
 
-## 🤝 Contribution
+## 🔒 Vie privée
 
-Les pull requests sont les bienvenues. Pour un changement structurant, ouvrir d'abord une issue pour en discuter.
+- **100 % local** : aucune télémétrie, aucune connexion sortante sauf vers l'API IA que vous avez configurée
+- **Pas de base de données** : tout vit dans votre vault `.md` + `~/.secondbrain/` (config + presets de prompts)
+- **Vos fichiers ne quittent pas votre machine** sauf quand vous invoquez l'IA (et même alors, seul le contenu nécessaire est envoyé)
+
+---
+
+## 🧱 Stack technique
+
+- **Backend** : Python 3.10+, Flask
+- **Frontend** : HTML/CSS/Vanilla JS, D3.js (pour le graphe), aucun framework
+- **IA** : Endpoint OpenAI-compatible (REST + JSON)
+- **Persistance** : Markdown plain text + JSON pour les presets
+
+Aucune dépendance lourde, aucun build step. Vous éditez `ui.html` → vous rafraîchissez la page → c'est appliqué.
+
+---
+
+## 🤝 Contribuer
+
+Le projet est conçu pour être étendu via plugins. Vous voulez ajouter une fonctionnalité ? **Créez un plugin** plutôt que de modifier le cœur — vos changements restent isolés et upgradables.
+
+→ **[PLUGIN-DEVELOPMENT.md](./PLUGIN-DEVELOPMENT.md)**
+
+Pour les contributions au cœur (bugs, performance, ergonomie), ouvrez une issue ou une pull request avec un cas de reproduction clair.
+
+---
+
+## 📜 Licence
+
+Voir le fichier `LICENSE`.
+
+---
+
+## 🙏 Remerciements
+
+Construit par Othman Benbrahim avec l'aide de Claude (Anthropic) comme pair-programmeur.
+Inspiré par Obsidian, Logseq, et la philosophie « tout en `.md` lisible » de l'écosystème IRIS∞.
