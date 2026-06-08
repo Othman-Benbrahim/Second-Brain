@@ -1,0 +1,66 @@
+<div id="marxiv" class="ov"><div class="mb mb-wide" style="width:780px;max-height:90vh">
+  <div style="display:flex;align-items:center;gap:10px">
+    <div class="mt" style="flex:1">🔬 Recherche ArXiv — agentique</div>
+    <button class="hbtn" onclick="closeArxiv()">✕</button>
+  </div>
+  <div class="minfo">L'IA lit votre fichier ouvert, génère une requête optimale, interroge ArXiv et synthétise les résultats.</div>
+
+  <div id="arx-form">
+    <label>Indication (optionnelle)</label>
+    <input id="arx-hint" type="text" placeholder="Ex: focus sur les méthodes bayésiennes / papiers récents 2024+…">
+    <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
+      <label style="margin:0">Nb papiers</label>
+      <select id="arx-n" style="width:auto">
+        <option value="5">5</option>
+        <option value="8" selected>8</option>
+        <option value="12">12</option>
+        <option value="20">20</option>
+      </select>
+      <button class="btn bp" onclick="runArxiv()" style="width:auto;padding:7px 16px;margin-left:auto">🚀 Lancer la recherche</button>
+    </div>
+  </div>
+
+  <div id="arx-progress" style="display:none">
+    <div id="arx-step1" class="arx-step">⏳ Étape 1/3 — L'IA génère la requête…</div>
+    <div id="arx-step2" class="arx-step muted">○ Étape 2/3 — Interrogation d'ArXiv</div>
+    <div id="arx-step3" class="arx-step muted">○ Étape 3/3 — Synthèse</div>
+  </div>
+
+  <div id="arx-error" style="display:none">
+    <div style="background:rgba(248,113,113,.08);border:1px solid rgba(248,113,113,.35);border-radius:var(--r);padding:12px 14px;font-size:12px;color:var(--red);line-height:1.55">
+      <div style="font-weight:600;margin-bottom:6px">⚠ Erreur</div>
+      <div id="arx-error-msg" style="font-family:var(--mono);font-size:11px;color:var(--tx3);white-space:pre-wrap;word-break:break-word;background:var(--bg3);padding:8px 10px;border-radius:6px;margin-top:6px;max-height:160px;overflow:auto"></div>
+      <div id="arx-edit-query" style="display:none;margin-top:9px">
+        <div style="font-size:11px;color:var(--tx2);margin-bottom:4px">✏️ Requête générée — modifiez-la si elle est trop complexe :</div>
+        <textarea id="arx-query-edit" style="width:100%;min-height:48px;font-family:var(--mono);font-size:11.5px;background:var(--bg3);border:1px solid var(--bdr);border-radius:6px;padding:6px 10px;color:var(--acc);resize:vertical"></textarea>
+      </div>
+      <div style="margin-top:9px;display:flex;gap:6px;flex-wrap:wrap">
+        <button class="btn bp" id="arx-retry-search" onclick="retryArxivSearch()" style="display:none;width:auto;padding:5px 12px;font-size:11px">🔄 Relancer ArXiv avec cette requête</button>
+        <button class="btn bs" onclick="window.open('/api/arxiv/ping','_blank')" style="width:auto;padding:5px 10px;font-size:11px">🩺 Test ArXiv</button>
+        <button class="btn bs" onclick="window.open('/api/test','_blank')" style="width:auto;padding:5px 10px;font-size:11px">🔍 Test API IA</button>
+        <button class="btn bs" onclick="closeArxiv();openCfg()" style="width:auto;padding:5px 10px;font-size:11px">⚙ Paramètres</button>
+        <button class="btn bs" onclick="$('arx-error').style.display='none';$('arx-form').style.display='block';$('arx-progress').style.display='none'" style="width:auto;padding:5px 10px;font-size:11px">↺ Tout reprendre</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="arx-results" style="display:none">
+    <div class="arx-block">
+      <div class="arx-block-title">🎯 Requête générée</div>
+      <code id="arx-query" style="background:var(--bg3);padding:6px 10px;border-radius:6px;display:block;color:var(--acc);font-size:12px"></code>
+    </div>
+    <div class="arx-block">
+      <div class="arx-block-title">📄 Papiers trouvés (<span id="arx-count">0</span>)</div>
+      <div id="arx-papers"></div>
+    </div>
+    <div class="arx-block" id="arx-syn-block" style="display:none">
+      <div class="arx-block-title">✨ Synthèse</div>
+      <div id="arx-synthesis" style="background:var(--bg3);border:1px solid var(--bdr);border-radius:var(--r);padding:14px;font-size:12.5px;line-height:1.7;max-height:340px;overflow-y:auto;color:var(--tx3);white-space:pre-wrap;font-family:var(--mono)"></div>
+    </div>
+    <div class="mf">
+      <button class="btn bs" onclick="closeArxiv()" style="width:auto;padding:7px 16px">Fermer</button>
+      <button class="btn bs" onclick="synthesizeArxiv()" id="arx-syn-btn" style="width:auto;padding:7px 16px">✨ Synthétiser</button>
+      <button class="btn bp" onclick="saveArxivAsFile()" id="arx-save-btn" style="display:none;width:auto;padding:7px 16px">💾 Sauver comme .md</button>
+    </div>
+  </div>
+</div></div>
