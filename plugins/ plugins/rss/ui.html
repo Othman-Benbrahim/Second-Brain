@@ -1,0 +1,124 @@
+<!-- Plugin RSS : modal avec 2 onglets (Gestion / Analyser) -->
+<div id="mrss" class="ov"><div class="mb mb-wide" style="width:920px;max-height:92vh">
+  <div style="display:flex;align-items:center;gap:10px">
+    <div class="mt" style="flex:1">🗞 Veille RSS — gestion + analyse IA</div>
+    <button class="hbtn" onclick="closeRSS()">✕</button>
+  </div>
+  <div class="minfo">Stockage dans <code>flux-rss.md</code> du vault (éditable manuellement). Auto-découverte du flux depuis n'importe quelle URL. Fetch parallèle du contenu complet.</div>
+
+  <div class="rss-tabs">
+    <button class="rss-tab on" id="rss-tab-manage"  onclick="rssSwitchTab('manage')">📡 Mes flux</button>
+    <button class="rss-tab"    id="rss-tab-analyze" onclick="rssSwitchTab('analyze')">🔍 Analyser</button>
+    <span style="margin-left:auto;font-size:10.5px;color:var(--tx2);font-family:var(--mono)" id="rss-vault-file">flux-rss.md</span>
+  </div>
+
+  <div id="rss-pane-manage" class="rss-pane">
+    <div class="arx-block">
+      <div class="arx-block-title">➕ Ajouter un flux</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap">
+        <input id="rss-add-url" type="text" placeholder="URL — flux RSS direct OU homepage (auto-découverte ex: lemonde.fr)"
+          style="flex:1;min-width:300px;padding:7px 11px;background:var(--bg3);border:1px solid var(--bdr);border-radius:6px;color:var(--tx);font-size:12px">
+        <input id="rss-add-tags" type="text" placeholder="#tags (optionnel)"
+          style="width:160px;padding:7px 11px;background:var(--bg3);border:1px solid var(--bdr);border-radius:6px;color:var(--tx);font-size:12px;font-family:var(--mono)">
+        <button class="btn bp" onclick="rssAddFeed()" id="rss-add-btn" style="width:auto;padding:7px 16px">➕ Ajouter</button>
+      </div>
+      <div id="rss-add-status" style="font-size:11px;color:var(--tx2);margin-top:6px;display:none"></div>
+      <div style="font-size:10.5px;color:var(--tx2);margin-top:4px;line-height:1.5">
+        💡 Tapez <code>lemonde.fr</code> ou <code>https://www.lemonde.fr/</code> — le plugin trouve tout seul le bon flux RSS.
+      </div>
+    </div>
+
+    <div class="arx-block">
+      <div class="arx-block-title">📋 Flux enregistrés (<span id="rss-feeds-count">0</span>)</div>
+      <div id="rss-feeds-list" style="max-height:340px;overflow-y:auto">
+        <div style="padding:20px;text-align:center;color:var(--tx2);font-size:12px">Chargement…</div>
+      </div>
+    </div>
+
+    <div class="mf">
+      <button class="btn bs" onclick="closeRSS()" style="width:auto;padding:7px 16px">Fermer</button>
+      <button class="btn bs" onclick="rssReloadList()" style="width:auto;padding:7px 16px">↻ Recharger</button>
+    </div>
+  </div>
+
+  <div id="rss-pane-analyze" class="rss-pane" style="display:none">
+    <div class="arx-block">
+      <div class="arx-block-title">🎯 Sélection des flux <span style="font-weight:400;color:var(--tx2);font-size:11px">— cochez ceux à analyser</span></div>
+      <div style="display:flex;gap:8px;margin-bottom:8px">
+        <button class="btn bs" onclick="rssSelectAll(true)" style="width:auto;padding:5px 10px;font-size:11px">Tout cocher</button>
+        <button class="btn bs" onclick="rssSelectAll(false)" style="width:auto;padding:5px 10px;font-size:11px">Tout décocher</button>
+      </div>
+      <div id="rss-analyze-feeds-list" style="max-height:200px;overflow-y:auto;border:1px solid var(--bdr);border-radius:6px;padding:8px;background:var(--bg3)">
+        <div style="padding:16px;text-align:center;color:var(--tx2);font-size:12px">Chargement des flux…</div>
+      </div>
+    </div>
+
+    <div class="arx-block">
+      <div class="arx-block-title">⚙ Paramètres</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;align-items:start">
+        <div>
+          <label style="font-size:11px;color:var(--tx2);margin-bottom:3px;display:block">Fenêtre temporelle</label>
+          <select id="rss-hours" style="width:100%;padding:6px 10px;background:var(--bg3);border:1px solid var(--bdr);border-radius:6px;color:var(--tx);font-size:12px">
+            <option value="24">24 dernières heures</option>
+            <option value="168" selected>7 derniers jours</option>
+            <option value="720">30 derniers jours</option>
+            <option value="0">Tout (pas de filtre)</option>
+          </select>
+        </div>
+        <div>
+          <label style="font-size:11px;color:var(--tx2);margin-bottom:3px;display:block">Max articles par flux</label>
+          <select id="rss-max-items" style="width:100%;padding:6px 10px;background:var(--bg3);border:1px solid var(--bdr);border-radius:6px;color:var(--tx);font-size:12px">
+            <option value="5">5</option>
+            <option value="10" selected>10</option>
+            <option value="20">20</option>
+            <option value="30">30</option>
+          </select>
+        </div>
+      </div>
+      <div style="display:flex;gap:14px;align-items:center;margin-top:10px;flex-wrap:wrap">
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:11.5px;color:var(--tx);margin:0">
+          <input type="checkbox" id="rss-fetch-full" checked style="accent-color:var(--acc)">
+          📖 Fetch contenu complet (qualité ++)
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:11.5px;color:var(--tx);margin:0">
+          <input type="radio" name="rss-mode" value="together" checked style="accent-color:var(--acc)">
+          🌐 Tous les flux ensemble
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:11.5px;color:var(--tx);margin:0">
+          <input type="radio" name="rss-mode" value="per_feed" style="accent-color:var(--acc)">
+          📑 Flux par flux
+        </label>
+      </div>
+    </div>
+
+    <div class="arx-block">
+      <div class="arx-block-title">🎯 Question / objectif <span style="font-weight:400;color:var(--tx2);font-size:11px">— optionnel mais recommandé</span></div>
+      <textarea id="rss-question" rows="2" placeholder="Ex : 'Que se passe-t-il sur l'IA cette semaine ?' / 'Repère les signaux faibles sur le Sahel' / 'Tendances contradictoires entre Le Monde et FT'…"
+        style="width:100%;font-size:12px;padding:8px 11px;background:var(--bg3);border:1px solid var(--bdr);border-radius:6px;color:var(--tx);resize:vertical;font-family:inherit"></textarea>
+    </div>
+
+    <div class="arx-block">
+      <div class="arx-block-title">📝 Prompt système <span style="font-weight:400;color:var(--tx2);font-size:11px">— filtres d'analyse (optionnel)</span></div>
+      <textarea id="rss-sys-prompt" data-sys-prompt-target rows="2" placeholder="Ex : 'Sois analyste OSINT, registre factuel' / 'Lecture zététique stricte' / 'Registre IRIS∞ symbolique'…"
+        style="width:100%;font-family:var(--mono);font-size:11.5px;padding:7px 10px;background:var(--bg3);border:1px solid var(--bdr);border-radius:6px;color:var(--tx);resize:vertical"></textarea>
+    </div>
+
+    <div id="rss-progress" style="display:none">
+      <div class="arx-block-title" id="rss-progress-step">⏳ Fetch des flux en cours…</div>
+    </div>
+
+    <div id="rss-result-block" style="display:none">
+      <div class="arx-block">
+        <div class="arx-block-title">✨ Synthèse <span id="rss-result-meta" style="font-weight:400;color:var(--tx2);font-size:10.5px"></span></div>
+        <div id="rss-result-content" style="background:var(--bg3);border:1px solid var(--bdr);border-radius:var(--r);padding:14px;font-size:12.5px;line-height:1.7;max-height:360px;overflow-y:auto;color:var(--tx3);white-space:pre-wrap;font-family:var(--mono)"></div>
+      </div>
+    </div>
+
+    <div class="mf">
+      <button class="btn bs" onclick="closeRSS()" style="width:auto;padding:7px 16px">Fermer</button>
+      <button class="btn bp" onclick="rssRunAnalysis()" id="rss-run-btn" style="width:auto;padding:7px 16px">🚀 Analyser</button>
+      <button class="btn bp" onclick="rssSaveAsFile()" id="rss-save-btn" style="display:none;width:auto;padding:7px 16px">💾 Sauver comme .md</button>
+    </div>
+  </div>
+
+</div></div>
