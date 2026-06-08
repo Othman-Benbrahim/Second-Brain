@@ -1,0 +1,14 @@
+{
+  "name": "ArXiv",
+  "version": "1.0",
+  "description": "Recherche ArXiv agentique : IA génère une requête depuis le fichier ouvert, interroge ArXiv, et synthétise les résultats en français avec citations.",
+  "author": "Second Brain core",
+  "buttons": [
+    {
+      "panel": "toolbar",
+      "label": "🔬 ArXiv",
+      "title": "Recherche ArXiv agentique",
+      "onclick": "openArxiv()"
+    }
+  ]
+}
