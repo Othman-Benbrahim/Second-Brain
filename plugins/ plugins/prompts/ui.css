@@ -1,16 +1,46 @@
-/* Plugin DuckDuckGo — résultats web */
-#ddg-list{display:flex;flex-direction:column;gap:6px;max-height:300px;overflow-y:auto}
-.ddg-item{padding:10px 12px;background:var(--bg3);border:1px solid var(--bdr);
-  border-radius:var(--r);transition:border-color .14s}
-.ddg-item:hover{border-color:var(--bdr2)}
-.ddg-item-title{font-size:12.5px;font-weight:600;color:var(--tx);margin-bottom:4px;
-  display:flex;gap:6px;align-items:flex-start}
-.ddg-item-num{color:var(--acc);flex-shrink:0;font-family:var(--mono);font-size:11.5px}
-.ddg-item-title a{color:var(--tx);text-decoration:none}
-.ddg-item-title a:hover{color:var(--acc);text-decoration:underline}
-.ddg-item-url{font-size:10.5px;color:var(--grn);font-family:var(--mono);margin-bottom:5px;
-  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
-  max-width:100%}
-.ddg-item-url a{color:var(--grn);text-decoration:none}
-.ddg-item-url a:hover{text-decoration:underline}
-.ddg-item-snippet{font-size:11.5px;color:var(--tx3);line-height:1.55}
+/* Plugin Prompts Manager */
+.prompts-layout{display:flex;gap:14px;height:460px;margin-top:10px}
+.prompts-list-col{width:260px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.prompts-edit-col{flex:1;display:flex;flex-direction:column;min-width:0;height:100%}
+#prompts-list{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:3px;
+  border:1px solid var(--bdr);border-radius:6px;padding:5px;background:var(--bg3)}
+.prompts-item{padding:8px 11px;border-radius:5px;cursor:pointer;
+  font-size:11.5px;color:var(--tx);transition:background .14s;border:1px solid transparent}
+.prompts-item:hover{background:rgba(255,255,255,.04)}
+.prompts-item.active{background:rgba(96,165,250,.1);color:var(--acc);border-color:rgba(96,165,250,.2)}
+.prompts-item .pname{font-weight:500;margin-bottom:3px}
+.prompts-item .pprev{font-size:10px;color:var(--tx2);font-family:var(--mono);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.3}
+.prompts-empty{flex:1;display:flex;align-items:center;justify-content:center;
+  color:var(--tx2);font-size:12px;border:1px dashed var(--bdr);border-radius:6px;padding:14px;text-align:center}
+#prompts-edit{display:flex;flex-direction:column;gap:10px;height:100%}
+.prompts-block{display:flex;flex-direction:column;gap:5px}
+.prompts-block label{font-size:11px;color:var(--tx2);font-weight:500}
+.prompts-block input,.prompts-block textarea{
+  font-size:12px;padding:7px 10px;background:var(--bg3);border:1px solid var(--bdr);
+  border-radius:6px;color:var(--tx);font-family:inherit}
+.prompts-block input:focus,.prompts-block textarea:focus{outline:none;border-color:var(--acc)}
+.prompts-content-block{flex:1;min-height:0}
+.prompts-content-block textarea{flex:1;font-family:var(--mono);font-size:11.5px;line-height:1.55;resize:none}
+.prompts-edit-actions{display:flex;gap:7px;justify-content:flex-end;padding-top:4px}
+.prompts-footer{margin-top:12px;padding-top:10px;border-top:1px solid var(--bdr);
+  font-size:10.5px;color:var(--tx2);display:flex;justify-content:space-between;align-items:center;gap:10px}
+.prompts-footer code{font-family:var(--mono);background:var(--bg3);padding:2px 6px;border-radius:3px;font-size:10px}
+
+/* Mini-dropdown injecté à côté des sys-prompt-target dans les modals des autres plugins */
+.sp-injected{display:flex;align-items:center;gap:6px;margin-top:5px;font-size:10.5px;color:var(--tx2)}
+.sp-btn{padding:3px 9px;font-size:10.5px;background:var(--bg3);border:1px solid var(--bdr);
+  border-radius:5px;color:var(--tx);cursor:pointer;font-family:inherit;transition:all .14s}
+.sp-btn:hover{border-color:var(--acc);color:var(--acc);background:rgba(96,165,250,.05)}
+.sp-current{color:var(--acc);font-family:var(--mono);font-size:10px}
+
+.sp-menu{position:fixed;background:var(--bg);border:1px solid var(--bdr2);border-radius:8px;
+  padding:5px;z-index:2000;min-width:280px;max-width:380px;max-height:340px;overflow-y:auto;
+  box-shadow:0 8px 32px rgba(0,0,0,.5)}
+.sp-menu .sp-opt{padding:8px 11px;font-size:11.5px;border-radius:5px;cursor:pointer;color:var(--tx);
+  transition:background .14s}
+.sp-menu .sp-opt:hover{background:rgba(96,165,250,.1);color:var(--acc)}
+.sp-menu .sp-opt .pprev{font-size:10px;color:var(--tx2);margin-top:3px;line-height:1.4;
+  overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.sp-menu .sp-opt:hover .pprev{color:var(--tx3)}
+.sp-menu-empty{padding:14px;text-align:center;color:var(--tx2);font-size:11px}
