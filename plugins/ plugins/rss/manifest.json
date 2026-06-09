@@ -1,14 +1,14 @@
 {
-  "name": "DuckDuckGo Search",
+  "name": "RSS Feeds",
   "version": "1.0",
-  "description": "Recherche web agentique via DuckDuckGo : l'IA génère une requête depuis le fichier ouvert, interroge DDG, et synthétise les résultats en français avec citations.",
+  "description": "Gestion + analyse IA de flux RSS/Atom. Stockage dans flux-rss.md du vault. Auto-découverte (lemonde.fr → /rss/une.xml). Modes : tous flux ensemble OU flux par flux. Fetch parallèle des articles complets.",
   "author": "Second Brain core",
   "buttons": [
     {
       "panel": "toolbar",
-      "label": "🦆 DDG",
-      "title": "Recherche web DuckDuckGo agentique",
-      "onclick": "openDuckDuckGo()"
+      "label": "🗞 RSS",
+      "title": "Veille RSS — gérer les flux + analyse IA",
+      "onclick": "openRSS()"
     }
   ]
 }

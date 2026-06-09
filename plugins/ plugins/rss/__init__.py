@@ -1,591 +1,798 @@
-"""
-Plugin DuckDuckGo Search — recherche web agentique avec synthèse IA.
+"""Plugin RSS — gestion + analyse IA des flux RSS/Atom.
 
-STRATÉGIES (essayées dans l'ordre, fallback automatique) :
-  1. Bibliothèque `ddgs` ou `duckduckgo-search` (recommandé)
-     → `pip install ddgs`  ou  `pip install duckduckgo-search`
-  2. Scraping de lite.duckduckgo.com (fallback sans dépendance)
+Caractéristiques :
+- Stockage des flux dans `flux-rss.md` à la racine du vault (philosophie IRIS∞)
+- Auto-découverte des flux RSS depuis n'importe quelle URL (ex: lemonde.fr → /rss/une.xml)
+- Parser natif RSS 2.0 + Atom 1.0 (pas de dépendance feedparser)
+- Fetch parallèle des articles complets (ThreadPoolExecutor)
+- Cache 30 min par flux et par article
+- Deux modes d'analyse : tous flux ensemble OU flux par flux
 """
-import re, time, html
+import re, time, html, os
+from datetime import datetime, timedelta, timezone
 from threading import Lock
-from urllib.parse import unquote
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+from urllib.parse import urljoin, urlparse
+import xml.etree.ElementTree as ET
 from flask import request, jsonify
 import requests as http
 
 from second_brain import _ai_call
 
-# Stratégie 1 : bibliothèque (essayer les 2 noms, le projet a été renommé)
-HAS_DDGS_LIB = False
-DDGS_FLAVOR  = None
-try:
-    from ddgs import DDGS                          # nouveau nom (≥ 2025)
-    HAS_DDGS_LIB = True
-    DDGS_FLAVOR  = "ddgs"
-except ImportError:
-    try:
-        from duckduckgo_search import DDGS         # ancien nom
-        HAS_DDGS_LIB = True
-        DDGS_FLAVOR  = "duckduckgo-search"
-    except ImportError:
-        pass
+# ── Configuration ─────────────────────────────────────────────
+VAULT_RSS_FILE   = "flux-rss.md"
+FETCH_TIMEOUT    = (10, 20)
+PARALLEL_WORKERS = 6
+ARTICLE_MAX_CHARS = 5000
+FEED_CACHE_TTL   = 1800    # 30 min
+PAGE_CACHE_TTL   = 1800
+USER_AGENT       = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36")
 
-DDG_LITE_URL = "https://lite.duckduckgo.com/lite/"
-DDG_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-          "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36")
+_FEED_CACHE = {}    # url -> (timestamp, items)
+_PAGE_CACHE = {}    # url -> (timestamp, content)
+_CACHE_LOCK = Lock()
 
-# Instances SearXNG publiques (fallback ultime si DDG bloque)
-SEARXNG_INSTANCES = [
-    "https://searx.be",
-    "https://searx.tiekoetter.com",
-    "https://priv.au",
-    "https://search.brave4u.com",
-    "https://searx.work",
+# Parsing flux-rss.md
+RE_FEED_LINE = re.compile(r'^\s*-\s+\[([^\]]+)\]\(([^)]+)\)(.*)$')
+RE_TAG       = re.compile(r'#([\w-]+)')
+RE_SECTION   = re.compile(r'^##\s+(.+)$')
+
+# Chemins de feed courants pour découverte par convention
+COMMON_FEED_PATHS = [
+    "/rss", "/feed", "/feed/", "/rss.xml", "/feed.xml", "/atom.xml",
+    "/feeds/posts/default", "/rss/une.xml", "/feed/rss",
+    "/index.rss", "/rss/all.xml", "/feed/atom",
 ]
 
-_DDG_LAST         = [0.0]
-_DDG_LOCK         = Lock()
-_DDG_MIN_INTERVAL = 1.5
-_DDG_CACHE        = {}
-_DDG_CACHE_TTL    = 300
 
-# Cache de pages fetchées (les pages bougent moins vite que les recherches)
-_PAGE_CACHE       = {}
-_PAGE_CACHE_TTL   = 1800     # 30 min
-PAGE_FETCH_TIMEOUT = (10, 15)  # (connect, read)
-PAGE_MAX_CHARS     = 5000      # texte par page envoyé à l'IA
-PAGE_MAX_PARALLEL  = 5         # threads simultanés
+# ═══════════════════════════════════════════════════════════════
+#  STORAGE — flux-rss.md
+# ═══════════════════════════════════════════════════════════════
 
+def _load_feeds_from_vault(vault_root):
+    """Lit flux-rss.md depuis la racine du vault.
+    Format de ligne : `- [nom](url) #tag1 #tag2`
+    Sections : `## NomSection` regroupe les flux suivants."""
+    feeds_file = Path(vault_root) / VAULT_RSS_FILE
+    if not feeds_file.exists():
+        return []
 
-def _ddg_wait():
-    with _DDG_LOCK:
-        elapsed = time.time() - _DDG_LAST[0]
-        if elapsed < _DDG_MIN_INTERVAL:
-            time.sleep(_DDG_MIN_INTERVAL - elapsed)
-        _DDG_LAST[0] = time.time()
-
-
-def _strip_html(s):
-    s = re.sub(r"<[^>]+>", "", s or "")
-    s = html.unescape(s)
-    return re.sub(r"\s+", " ", s).strip()
-
-
-def _decode_ddg_url(href):
-    if not href: return ""
-    if href.startswith("//"): href = "https:" + href
-    if "/l/?" in href or href.startswith("/l/"):
-        try:
-            qs = href.split("?", 1)[1]
-            for part in qs.split("&"):
-                if part.startswith("uddg="):
-                    return unquote(part[5:])
-        except Exception:
-            pass
-    return href
-
-
-def _lib_call(query, n, backend=None, region="wt-wt", safesearch="moderate"):
-    """Wrap unique de DDGS.text() — gère versions anciennes ET récentes."""
-    ddgs = DDGS()
+    feeds = []
+    current_section = None
     try:
-        # Tentative complète (versions récentes : backend en kwarg)
-        kwargs = {"max_results": n, "region": region, "safesearch": safesearch}
-        if backend: kwargs["backend"] = backend
-        raw = ddgs.text(query, **kwargs)
-        return list(raw) if raw is not None else []
-    except TypeError as e:
-        # Version qui n'accepte pas certains kwargs : retry sans backend
-        try:
-            raw = ddgs.text(query, max_results=n, region=region, safesearch=safesearch)
-            return list(raw) if raw is not None else []
-        except TypeError:
-            # Version vraiment ancienne : appel minimal
-            try:
-                raw = ddgs.text(query, max_results=n)
-                return list(raw) if raw is not None else []
-            except Exception as e3:
-                raise RuntimeError(f"ddgs.text(minimal) : {type(e3).__name__}: {e3}")
-    except Exception as e:
-        raise RuntimeError(f"ddgs.text() : {type(e).__name__}: {str(e)[:200]}")
-    finally:
-        try:
-            if hasattr(ddgs, "close"): ddgs.close()
-        except Exception: pass
-
-
-def _search_via_lib(query, n):
-    """Recherche via la bibliothèque. Le backend 'api' (défaut) est souvent
-    soft-bloqué et retourne 0 résultats silencieusement. On essaie donc
-    explicitement 'html' puis 'lite' avant de retomber sur 'api'."""
-    last_err = None
-    # Backend en 1er argument : 'html' et 'lite' sont plus fiables que 'api' (défaut)
-    backend_configs = [
-        ("html", "wt-wt", "moderate"),
-        ("lite", "wt-wt", "moderate"),
-        ("html", "us-en", "moderate"),
-        (None,   "wt-wt", "moderate"),   # défaut, en dernier recours
-    ]
-    for backend, region, safe in backend_configs:
-        try:
-            raw = _lib_call(query, n, backend=backend, region=region, safesearch=safe)
-            if raw:
-                return [{
-                    "title":   (r.get("title") or "")[:300],
-                    "url":     r.get("href") or r.get("url") or "",
-                    "snippet": (r.get("body")  or r.get("snippet") or "")[:700],
-                } for r in raw if isinstance(r, dict)]
-            last_err = RuntimeError(f"backend={backend!r}, region={region!r} : 0 résultat")
-        except Exception as e:
-            last_err = e
-            time.sleep(0.4)
-            continue
-    if last_err: raise last_err
-    return []
-
-
-_RE_LITE_LINK = re.compile(
-    r"<a[^>]+class=['\"]result-link['\"][^>]+href=['\"]([^'\"]+)['\"][^>]*>(.*?)</a>"
-    r"|<a[^>]+href=['\"]([^'\"]+)['\"][^>]+class=['\"]result-link['\"][^>]*>(.*?)</a>",
-    re.DOTALL | re.IGNORECASE
-)
-_RE_LITE_SNIPPET = re.compile(
-    r"<td[^>]+class=['\"]result-snippet['\"][^>]*>(.*?)</td>",
-    re.DOTALL | re.IGNORECASE
-)
-
-
-def _search_via_lite(query, n):
-    """Fallback : scraping de l'interface lite, avec retry 30s sur 202."""
-    for attempt in range(2):
-        r = http.get(DDG_LITE_URL,
-            params={"q": query, "kl": "wt-wt"},
-            headers={
-                "User-Agent": DDG_UA,
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",
-                "Referer": "https://duckduckgo.com/",
-                "DNT": "1",
-            },
-            timeout=(15, 30))
-
-        if r.status_code == 202:
-            if attempt < 1:
-                time.sleep(30)  # Le blocage 202 est souvent court — on attend
-                continue
-            raise RuntimeError(
-                "DDG HTTP 202 (votre IP est rate-limitée par DuckDuckGo). "
-                "Solutions immédiates : (1) patientez 15-30 min, "
-                "(2) VPN/changement de réseau, "
-                "(3) le fallback SearXNG va prendre le relais."
-            )
-        if r.status_code == 429:
-            raise RuntimeError("DDG HTTP 429 — rate-limit. Patientez 60 s.")
-        if r.status_code != 200:
-            raise RuntimeError(f"DDG lite HTTP {r.status_code}")
-        break  # succès, on sort de la boucle
-
-    text = r.text
-    if "anomaly" in text.lower()[:1000]:
-        raise RuntimeError("DDG marque la requête comme anomalie — passage à SearXNG.")
-
-    out, items = [], []
-    for m in _RE_LITE_LINK.finditer(text):
-        href  = m.group(1) or m.group(3)
-        title = m.group(2) or m.group(4)
-        if href: items.append((href, title))
-
-    snippets = [m.group(1) for m in _RE_LITE_SNIPPET.finditer(text)]
-
-    for i, (href, title) in enumerate(items[:n]):
-        snippet = snippets[i] if i < len(snippets) else ""
-        url = _decode_ddg_url(href)
-        if not url or "duckduckgo.com" in url: continue
-        out.append({
-            "title":   _strip_html(title)[:300],
-            "url":     url,
-            "snippet": _strip_html(snippet)[:700],
-        })
-
-    if not out and not items:
-        raise RuntimeError("0 résultats parsables depuis lite — DDG a peut-être changé son HTML")
-    return out
-
-
-def _search_via_searxng(query, n):
-    """Stratégie 3 — méta-recherche via instances SearXNG publiques.
-    SearXNG agrège Google/Bing/DDG/etc., donc immunisé aux blocages DDG-spécifiques."""
-    last_err = None
-    for instance in SEARXNG_INSTANCES:
-        try:
-            # Essayer l'API JSON d'abord
-            r = http.get(
-                f"{instance}/search",
-                params={
-                    "q": query,
-                    "format": "json",
-                    "categories": "general",
-                    "language": "fr",
-                    "safesearch": "1",
-                },
-                headers={
-                    "User-Agent": DDG_UA,
-                    "Accept": "application/json,text/html;q=0.5",
-                    "Accept-Language": "fr-FR,fr;q=0.9",
-                },
-                timeout=(10, 20))
-
-            if r.status_code != 200:
-                last_err = RuntimeError(f"{instance} : HTTP {r.status_code}")
-                continue
-
-            # Tenter le parsing JSON
-            ct = (r.headers.get("content-type", "") or "").lower()
-            if "json" in ct:
-                try:
-                    data = r.json()
-                except Exception as e:
-                    last_err = RuntimeError(f"{instance} : JSON invalide")
+        with open(feeds_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                m_section = RE_SECTION.match(line)
+                if m_section:
+                    current_section = m_section.group(1).strip()
                     continue
-                items = data.get("results", []) or []
-                if not items:
-                    last_err = RuntimeError(f"{instance} : 0 résultat JSON")
-                    continue
-                out = []
-                for it in items[:n]:
-                    url = it.get("url") or ""
-                    if not url: continue
-                    # Filtrer les liens internes searxng
-                    if any(p in url for p in ("/search?", "searx.", "searxng.")): continue
-                    out.append({
-                        "title":   (it.get("title") or "")[:300],
-                        "url":     url,
-                        "snippet": (it.get("content") or it.get("snippet") or "")[:700],
+                m_feed = RE_FEED_LINE.match(line)
+                if m_feed:
+                    name = m_feed.group(1).strip()
+                    url = m_feed.group(2).strip()
+                    extra = m_feed.group(3) or ''
+                    tags = [t.lower() for t in RE_TAG.findall(extra)]
+                    feeds.append({
+                        'name': name,
+                        'url': url,
+                        'tags': tags,
+                        'section': current_section,
                     })
-                if out: return out
-                last_err = RuntimeError(f"{instance} : 0 résultat utilisable")
-            else:
-                # JSON désactivé sur cette instance — passer à la suivante
-                last_err = RuntimeError(f"{instance} : JSON désactivé (HTML reçu)")
-                continue
-
-        except http.exceptions.Timeout:
-            last_err = RuntimeError(f"{instance} : timeout")
-            continue
-        except Exception as e:
-            last_err = RuntimeError(f"{instance} : {type(e).__name__}: {str(e)[:80]}")
-            continue
-
-    raise last_err if last_err else RuntimeError(
-        "Toutes les instances SearXNG sont injoignables. "
-        "Patientez ou installez/maj `pip install --upgrade ddgs`"
-    )
+    except Exception as e:
+        print(f"[RSS] Erreur lecture {feeds_file}: {e}")
+    return feeds
 
 
-def _search_ddg(query, n=10):
-    cache_key = (query, n)
-    cached = _DDG_CACHE.get(cache_key)
-    if cached and (time.time() - cached[0]) < _DDG_CACHE_TTL:
-        return cached[1]
+def _save_feeds_to_vault(vault_root, feeds):
+    """Écrit la liste des flux dans flux-rss.md.
+    Préserve les sections (lignes ## ...)."""
+    feeds_file = Path(vault_root) / VAULT_RSS_FILE
 
-    _ddg_wait()
+    # Regrouper par section
+    by_section = {}
+    for f in feeds:
+        sec = f.get('section') or ''
+        by_section.setdefault(sec, []).append(f)
 
-    strategies = []
-    if HAS_DDGS_LIB:
-        strategies.append(("lib", _search_via_lib))
-    strategies.append(("lite", _search_via_lite))
-    strategies.append(("searxng", _search_via_searxng))   # ← 3e fallback : méta-recherche
+    lines = [
+        '# Flux RSS',
+        '',
+        '*Fichier géré par le plugin RSS de Second Brain (mais éditable manuellement).*',
+        '*Format : `- [nom](url-du-flux) #tag1 #tag2` — sections `## NomSection` regroupent les flux.*',
+        '',
+    ]
 
-    last_err = None
-    for name, fn in strategies:
+    # Flux sans section d'abord
+    if '' in by_section:
+        for f in by_section['']:
+            lines.append(_format_feed_line(f))
+        lines.append('')
+        del by_section['']
+
+    # Sections triées
+    for section in sorted(by_section.keys()):
+        lines.append(f'## {section}')
+        for f in by_section[section]:
+            lines.append(_format_feed_line(f))
+        lines.append('')
+
+    feeds_file.write_text('\n'.join(lines), encoding='utf-8')
+
+
+def _format_feed_line(f):
+    line = f'- [{f["name"]}]({f["url"]})'
+    if f.get('tags'):
+        line += ' ' + ' '.join(f'#{t}' for t in f['tags'])
+    return line
+
+
+# ═══════════════════════════════════════════════════════════════
+#  DÉCOUVERTE de flux RSS depuis URL arbitraire
+# ═══════════════════════════════════════════════════════════════
+
+def _looks_like_feed(text, content_type=''):
+    """Vérifie si un contenu ressemble à un flux RSS/Atom."""
+    if 'xml' in (content_type or '').lower():
+        return True
+    head = text[:1500].lower()
+    return ('<rss' in head or '<feed' in head or '<rdf' in head
+            or '<?xml' in head and ('<channel' in head or '<entry' in head))
+
+
+def _parse_feed_title(xml_text):
+    """Extrait le titre <title> du flux pour le proposer comme nom."""
+    # Regex tolérante (évite les soucis de namespace ET XML)
+    m = re.search(r'<channel[^>]*>.*?<title[^>]*>([^<]+)</title>',
+                  xml_text[:3000], re.DOTALL | re.IGNORECASE)
+    if m: return html.unescape(m.group(1).strip())
+    m = re.search(r'<feed[^>]*>.*?<title[^>]*>([^<]+)</title>',
+                  xml_text[:3000], re.DOTALL | re.IGNORECASE)
+    if m: return html.unescape(m.group(1).strip())
+    m = re.search(r'<title[^>]*>([^<]+)</title>', xml_text[:2000], re.IGNORECASE)
+    if m: return html.unescape(m.group(1).strip())
+    return None
+
+
+def _discover_feed_url(url):
+    """Trouve l'URL RSS effective à partir d'une URL quelconque.
+    Retourne (feed_url, name) ou (None, error_msg)."""
+    if not url:
+        return None, "URL vide"
+    if not url.startswith(('http://', 'https://')):
+        url = 'https://' + url
+
+    # Étape 1 : si l'URL ressemble déjà à un flux, on tente directement
+    lower = url.lower()
+    looks_feed = any(lower.rstrip('/').endswith(s) for s in ('.xml', '.rss', '.atom')) \
+              or any(s in lower for s in ('/rss', '/feed', '/atom'))
+    if looks_feed:
         try:
-            results = fn(query, n)
-            if results:
-                _DDG_CACHE[cache_key] = (time.time(), results)
-                return results
-            last_err = RuntimeError(f"Stratégie '{name}' : 0 résultat (même après retry)")
-        except Exception as e:
-            last_err = e
+            r = http.get(url, headers={'User-Agent': USER_AGENT, 'Accept': 'application/rss+xml,application/xml,text/xml,*/*;q=0.5'},
+                         timeout=FETCH_TIMEOUT, allow_redirects=True)
+            if r.status_code == 200 and _looks_like_feed(r.text, r.headers.get('content-type', '')):
+                name = _parse_feed_title(r.text) or _domain_name(url)
+                return r.url, name
+        except Exception:
+            pass  # On poursuit avec la découverte
+
+    # Étape 2 : récupérer la page HTML et chercher <link rel="alternate">
+    try:
+        r = http.get(url, headers={'User-Agent': USER_AGENT},
+                     timeout=FETCH_TIMEOUT, allow_redirects=True)
+        if r.status_code != 200:
+            return _try_common_feed_paths(url)
+
+        text = r.text
+
+        # Si l'URL était une homepage mais renvoie déjà du XML (rare)
+        if _looks_like_feed(text, r.headers.get('content-type', '')):
+            name = _parse_feed_title(text) or _domain_name(url)
+            return r.url, name
+
+        # Cherche <link rel="alternate" type="application/(rss|atom|rdf)+xml" href="...">
+        feed_links = re.findall(
+            r'<link[^>]*rel=["\']alternate["\'][^>]*type=["\']application/(?:rss|atom|rdf)\+xml["\'][^>]*?href=["\']([^"\']+)["\']',
+            text, re.IGNORECASE)
+        # Variante où href apparaît avant type
+        feed_links += re.findall(
+            r'<link[^>]*type=["\']application/(?:rss|atom|rdf)\+xml["\'][^>]*?href=["\']([^"\']+)["\']',
+            text, re.IGNORECASE)
+        feed_links += re.findall(
+            r'<link[^>]*href=["\']([^"\']+)["\'][^>]*type=["\']application/(?:rss|atom|rdf)\+xml["\']',
+            text, re.IGNORECASE)
+
+        if feed_links:
+            feed_url = urljoin(r.url, feed_links[0])
+            # Récupérer le titre depuis le flux directement
+            try:
+                rf = http.get(feed_url, headers={'User-Agent': USER_AGENT},
+                              timeout=FETCH_TIMEOUT, allow_redirects=True)
+                if rf.status_code == 200:
+                    name = _parse_feed_title(rf.text)
+                    if name: return rf.url, name
+            except Exception:
+                pass
+            # Fallback : titre de la page d'origine
+            title_m = re.search(r'<title[^>]*>([^<]+)</title>', text, re.IGNORECASE)
+            name = html.unescape(title_m.group(1).strip()) if title_m else _domain_name(url)
+            return feed_url, name
+
+        # Pas de link rel=alternate, essayer les chemins courants
+        return _try_common_feed_paths(url)
+
+    except Exception as e:
+        return _try_common_feed_paths(url)
+
+
+def _try_common_feed_paths(base_url):
+    """Essaie les chemins de feed courants sur le domaine."""
+    parsed = urlparse(base_url)
+    root = f"{parsed.scheme}://{parsed.netloc}"
+
+    for path in COMMON_FEED_PATHS:
+        try_url = root + path
+        try:
+            r = http.get(try_url, headers={'User-Agent': USER_AGENT},
+                         timeout=(5, 12), allow_redirects=True)
+            if r.status_code == 200 and _looks_like_feed(r.text, r.headers.get('content-type', '')):
+                name = _parse_feed_title(r.text) or _domain_name(try_url)
+                return r.url, name
+        except Exception:
             continue
 
-    raise last_err if last_err else RuntimeError("Toutes les stratégies DDG ont échoué")
+    return None, f"Aucun flux RSS détecté à {base_url} (auto-discovery + {len(COMMON_FEED_PATHS)} chemins essayés)"
 
 
-# ════════════════════════════════════════════════════════
-#  Fetching de pages complètes (option B)
-# ════════════════════════════════════════════════════════
+def _domain_name(url):
+    try:
+        return urlparse(url).netloc.replace('www.', '')
+    except Exception:
+        return url
 
-def _fetch_page(url):
-    """Récupère et extrait le contenu textuel d'une page web.
-    Retourne (content, error_or_None). content limité à PAGE_MAX_CHARS."""
-    if not url or not url.startswith(("http://", "https://")):
+
+# ═══════════════════════════════════════════════════════════════
+#  PARSER RSS 2.0 + Atom 1.0
+# ═══════════════════════════════════════════════════════════════
+
+def _parse_feed(xml_text, max_items=50):
+    """Parse un flux RSS 2.0 ou Atom 1.0.
+    Retourne une liste d'items : {title, link, date_str, date_parsed, description}"""
+    items = []
+
+    # Nettoyer les namespaces pour faciliter le parsing
+    # Retire xmlns="..." et xmlns:prefix="..."
+    cleaned = re.sub(r'\sxmlns(?::\w+)?="[^"]*"', '', xml_text)
+    # Remplace les préfixes dans les balises : <content:encoded> → <content_encoded>
+    cleaned = re.sub(r'<(/?)(\w+):(\w+)', r'<\1\2_\3', cleaned)
+
+    try:
+        root = ET.fromstring(cleaned)
+    except ET.ParseError:
+        # Tentative de récupération : tronquer si XML corrompu en fin
+        # Essayer juste de chercher les <item> ou <entry> en regex
+        return _parse_feed_regex(xml_text, max_items)
+
+    # RSS 2.0 : <rss><channel><item>...
+    # Atom 1.0 : <feed><entry>...
+    item_elements = root.findall('.//item') or root.findall('.//entry')
+
+    for el in item_elements[:max_items]:
+        items.append(_extract_item(el))
+
+    return items
+
+
+def _extract_item(el):
+    """Extrait un item RSS ou une entry Atom."""
+    title = (el.findtext('title') or '').strip()
+
+    # Link : <link>URL</link> en RSS, <link href="URL"/> en Atom
+    link = ''
+    link_el = el.find('link')
+    if link_el is not None:
+        link = (link_el.text or link_el.get('href') or '').strip()
+    if not link:
+        # Atom peut avoir plusieurs <link>, prendre rel="alternate"
+        for le in el.findall('link'):
+            if le.get('rel', 'alternate') == 'alternate':
+                link = (le.get('href') or '').strip()
+                if link: break
+
+    # Date
+    date_str = (el.findtext('pubDate')
+                or el.findtext('published')
+                or el.findtext('updated')
+                or el.findtext('dc_date')
+                or el.findtext('date')
+                or '').strip()
+
+    # Description
+    description = (el.findtext('description')
+                   or el.findtext('summary')
+                   or el.findtext('content_encoded')
+                   or el.findtext('content')
+                   or '').strip()
+
+    # Strip HTML de la description
+    description = re.sub(r'<[^>]+>', ' ', description)
+    description = html.unescape(description)
+    description = re.sub(r'\s+', ' ', description).strip()
+
+    return {
+        'title': html.unescape(title)[:300],
+        'link': link,
+        'date_str': date_str,
+        'date_parsed': _parse_date(date_str),
+        'description': description[:1500],
+    }
+
+
+def _parse_feed_regex(xml_text, max_items):
+    """Fallback regex si l'XML est mal formé."""
+    items = []
+    # Chercher <item>...</item> ou <entry>...</entry>
+    pattern = re.compile(r'<(?:item|entry)\b[^>]*>(.*?)</(?:item|entry)>',
+                         re.DOTALL | re.IGNORECASE)
+    for m in pattern.finditer(xml_text):
+        blob = m.group(1)
+        def first(*tags):
+            for t in tags:
+                mm = re.search(rf'<{t}\b[^>]*>(.*?)</{t}>', blob, re.DOTALL | re.IGNORECASE)
+                if mm: return mm.group(1).strip()
+            return ''
+        link_m = re.search(r'<link[^>]*href=["\']([^"\']+)["\']', blob, re.IGNORECASE)
+        link = link_m.group(1) if link_m else first('link')
+        description = first('description', 'summary', 'content:encoded', 'content')
+        description = re.sub(r'<[^>]+>', ' ', description)
+        description = html.unescape(description)
+        description = re.sub(r'\s+', ' ', description).strip()
+        items.append({
+            'title': html.unescape(first('title'))[:300],
+            'link': link.strip(),
+            'date_str': first('pubDate', 'published', 'updated'),
+            'date_parsed': _parse_date(first('pubDate', 'published', 'updated')),
+            'description': description[:1500],
+        })
+        if len(items) >= max_items: break
+    return items
+
+
+def _parse_date(date_str):
+    """Parse une date RSS/Atom. Retourne datetime UTC-naive ou None."""
+    if not date_str: return None
+    s = date_str.strip()
+    # Normaliser GMT/UTC
+    s = s.replace(' GMT', ' +0000').replace(' UTC', ' +0000')
+
+    formats = [
+        '%a, %d %b %Y %H:%M:%S %z',     # RFC 822 avec TZ
+        '%a, %d %b %Y %H:%M:%S',         # Sans TZ
+        '%Y-%m-%dT%H:%M:%S%z',           # ISO 8601 avec TZ
+        '%Y-%m-%dT%H:%M:%S.%f%z',        # ISO 8601 microseconds
+        '%Y-%m-%dT%H:%M:%SZ',            # ISO 8601 Z
+        '%Y-%m-%dT%H:%M:%S',             # ISO 8601 sans TZ
+        '%Y-%m-%d %H:%M:%S',
+        '%Y-%m-%d',
+    ]
+    for fmt in formats:
+        try:
+            dt = datetime.strptime(s, fmt)
+            # Normaliser en UTC-naive
+            if dt.tzinfo is not None:
+                dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+            return dt
+        except ValueError:
+            continue
+    return None
+
+
+# ═══════════════════════════════════════════════════════════════
+#  FETCH (flux + articles)
+# ═══════════════════════════════════════════════════════════════
+
+def _fetch_feed(url, max_items=50):
+    """Récupère un flux RSS et parse les items. Cache 30 min."""
+    with _CACHE_LOCK:
+        cached = _FEED_CACHE.get(url)
+        if cached and (time.time() - cached[0]) < FEED_CACHE_TTL:
+            return cached[1]
+
+    try:
+        r = http.get(url,
+            headers={'User-Agent': USER_AGENT,
+                     'Accept': 'application/rss+xml,application/xml,text/xml,*/*;q=0.5'},
+            timeout=FETCH_TIMEOUT, allow_redirects=True)
+    except http.exceptions.Timeout:
+        raise RuntimeError("timeout")
+    except Exception as e:
+        raise RuntimeError(f"{type(e).__name__}: {str(e)[:100]}")
+
+    if r.status_code != 200:
+        raise RuntimeError(f"HTTP {r.status_code}")
+    if not _looks_like_feed(r.text, r.headers.get('content-type', '')):
+        raise RuntimeError("contenu non RSS/Atom (le flux n'est peut-être plus valide)")
+
+    items = _parse_feed(r.text, max_items)
+    if not items:
+        raise RuntimeError("0 item parsé")
+
+    with _CACHE_LOCK:
+        _FEED_CACHE[url] = (time.time(), items)
+    return items
+
+
+def _fetch_article(url):
+    """Récupère et nettoie le contenu textuel d'un article.
+    Retourne (content, error_or_None)."""
+    if not url or not url.startswith(('http://', 'https://')):
         return None, "URL invalide"
 
-    # Cache check
-    cached = _PAGE_CACHE.get(url)
-    if cached and (time.time() - cached[0]) < _PAGE_CACHE_TTL:
-        return cached[1], None
+    with _CACHE_LOCK:
+        cached = _PAGE_CACHE.get(url)
+        if cached and (time.time() - cached[0]) < PAGE_CACHE_TTL:
+            return cached[1], None
 
     try:
         r = http.get(url,
             headers={
-                "User-Agent": DDG_UA,
-                "Accept": "text/html,application/xhtml+xml,*/*;q=0.5",
-                "Accept-Language": "fr,en;q=0.7",
+                'User-Agent': USER_AGENT,
+                'Accept': 'text/html,application/xhtml+xml,*/*;q=0.5',
+                'Accept-Language': 'fr,en;q=0.7',
             },
-            timeout=PAGE_FETCH_TIMEOUT,
-            allow_redirects=True)
+            timeout=FETCH_TIMEOUT, allow_redirects=True)
     except http.exceptions.Timeout:
         return None, "timeout"
-    except http.exceptions.RequestException as e:
-        return None, f"{type(e).__name__}"
     except Exception as e:
-        return None, f"erreur: {type(e).__name__}"
+        return None, f"{type(e).__name__}"
 
     if r.status_code != 200:
         return None, f"HTTP {r.status_code}"
 
-    ct = (r.headers.get("Content-Type", "") or "").lower()
-    if ct and ("html" not in ct and "xml" not in ct and "text" not in ct):
-        return None, f"type non textuel"
+    ct = (r.headers.get('Content-Type', '') or '').lower()
+    if ct and ('html' not in ct and 'xml' not in ct and 'text' not in ct):
+        return None, "type non textuel"
 
-    text = r.text or ""
+    text = r.text or ''
     if not text:
         return None, "page vide"
 
-    # 1) Essayer d'extraire le bloc principal : <article> ou <main>
-    main_m = re.search(
-        r"<(?:article|main)\b[^>]*>(.*?)</(?:article|main)>",
-        text, re.DOTALL | re.IGNORECASE)
+    # Extraire <article> ou <main>
+    main_m = re.search(r'<(?:article|main)\b[^>]*>(.*?)</(?:article|main)>',
+                       text, re.DOTALL | re.IGNORECASE)
     if main_m:
         text = main_m.group(1)
     else:
-        body_m = re.search(r"<body\b[^>]*>(.*?)</body>", text, re.DOTALL | re.IGNORECASE)
+        body_m = re.search(r'<body\b[^>]*>(.*?)</body>', text, re.DOTALL | re.IGNORECASE)
         if body_m: text = body_m.group(1)
 
-    # 2) Retirer les blocs non-contenu
-    for tag in ("script", "style", "nav", "footer", "header", "aside",
-                "form", "iframe", "noscript", "svg", "button"):
-        text = re.sub(rf"<{tag}\b[^>]*>.*?</{tag}>", " ", text,
+    # Retirer les blocs non-contenu
+    for tag in ('script', 'style', 'nav', 'footer', 'header', 'aside',
+                'form', 'iframe', 'noscript', 'svg', 'button'):
+        text = re.sub(rf'<{tag}\b[^>]*>.*?</{tag}>', ' ', text,
                       flags=re.DOTALL | re.IGNORECASE)
 
-    # 3) Strip tous les tags restants
-    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r'<[^>]+>', ' ', text)
     text = html.unescape(text)
-    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r'\s+', ' ', text).strip()
 
     if len(text) < 100:
-        return None, "trop court après extraction"
+        return None, "trop court"
 
-    text = text[:PAGE_MAX_CHARS]
-    _PAGE_CACHE[url] = (time.time(), text)
+    text = text[:ARTICLE_MAX_CHARS]
+    with _CACHE_LOCK:
+        _PAGE_CACHE[url] = (time.time(), text)
     return text, None
 
 
-def _fetch_pages_parallel(results, n_fetch):
-    """Lance en parallèle le fetch des `n_fetch` premiers résultats.
-    Modifie results[i] en place avec full_content et fetch_status."""
-    if not results: return results
-    to_fetch = results[:n_fetch]
-    with ThreadPoolExecutor(max_workers=PAGE_MAX_PARALLEL) as ex:
-        futures = {ex.submit(_fetch_page, r["url"]): i for i, r in enumerate(to_fetch)}
-        for future in as_completed(futures):
-            i = futures[future]
+def _fetch_articles_parallel(items):
+    """Fetch en parallèle le contenu complet des articles.
+    Modifie items en place : ajoute full_content + fetch_status."""
+    if not items: return items
+    with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as ex:
+        futures = {ex.submit(_fetch_article, it['link']): i
+                   for i, it in enumerate(items) if it.get('link')}
+        for fut in as_completed(futures):
+            i = futures[fut]
             try:
-                content, err = future.result()
+                content, err = fut.result()
                 if content:
-                    to_fetch[i]["full_content"] = content
-                    to_fetch[i]["fetch_status"] = "ok"
-                    to_fetch[i]["fetch_chars"]  = len(content)
+                    items[i]['full_content'] = content
+                    items[i]['fetch_status'] = 'ok'
+                    items[i]['fetch_chars'] = len(content)
                 else:
-                    to_fetch[i]["fetch_status"] = err or "vide"
+                    items[i]['fetch_status'] = err or 'vide'
             except Exception as e:
-                to_fetch[i]["fetch_status"] = f"erreur: {type(e).__name__}"
-    # Marquer les résultats non récupérés
-    for r in results[n_fetch:]:
-        r.setdefault("fetch_status", "non récupéré")
-    return results
+                items[i]['fetch_status'] = f"erreur: {type(e).__name__}"
+    return items
 
+
+# ═══════════════════════════════════════════════════════════════
+#  REGISTER — routes Flask
+# ═══════════════════════════════════════════════════════════════
 
 def register(app, rd_cfg):
 
-    @app.route("/api/ddg/ping", methods=["GET"])
-    def ddg_ping():
-        """Diagnostic détaillé : teste chaque backend de la lib + scraping lite."""
-        t0 = time.time()
-        test_query = request.args.get("q", "python programming language")
-        out = {
-            "lib_available": HAS_DDGS_LIB,
-            "lib_flavor":    DDGS_FLAVOR,
-            "test_query":    test_query,
-            "strategies_tried": [],
-        }
-        if HAS_DDGS_LIB:
-            # Tester chaque backend séparément pour identifier celui qui marche
-            for backend in ("html", "lite", "api", None):
-                try:
-                    results = _lib_call(test_query, 3, backend=backend, region="wt-wt", safesearch="moderate")
-                    label = f"lib (backend={backend!r})" if backend else "lib (backend défaut)"
-                    out["strategies_tried"].append({
-                        "name": label, "ok": True, "results": len(results),
-                        "sample_title": (results[0].get("title")[:80] if results and results[0].get("title") else None)
-                    })
-                    time.sleep(0.4)
-                except Exception as e:
-                    label = f"lib (backend={backend!r})" if backend else "lib (backend défaut)"
-                    out["strategies_tried"].append({"name": label, "ok": False, "error": str(e)[:200]})
+    def _vault_root():
+        return rd_cfg().get('workspace') or str(Path.home())
+
+    @app.route("/api/rss/list", methods=["GET"])
+    def rss_list():
+        feeds = _load_feeds_from_vault(_vault_root())
+        return jsonify({"feeds": feeds, "count": len(feeds),
+                        "vault_file": str(Path(_vault_root()) / VAULT_RSS_FILE)})
+
+    @app.route("/api/rss/discover", methods=["POST"])
+    def rss_discover():
+        d = request.json or {}
+        url = (d.get('url') or '').strip()
+        if not url:
+            return jsonify({"error": "URL manquante"}), 400
+        feed_url, name = _discover_feed_url(url)
+        if feed_url is None:
+            return jsonify({"error": name, "original_url": url}), 404
+        return jsonify({"feed_url": feed_url, "name": name, "original_url": url})
+
+    @app.route("/api/rss/add", methods=["POST"])
+    def rss_add():
+        d = request.json or {}
+        url = (d.get('url') or '').strip()
+        if not url:
+            return jsonify({"error": "URL manquante"}), 400
+
+        # Résoudre l'URL en flux RSS effectif
+        feed_url, discovered_name = _discover_feed_url(url)
+        if feed_url is None:
+            return jsonify({"error": discovered_name}), 404
+
+        name    = (d.get('name') or '').strip() or discovered_name
+        tags    = d.get('tags', []) or []
+        section = d.get('section')
+
+        vault = _vault_root()
+        feeds = _load_feeds_from_vault(vault)
+        if any(f['url'] == feed_url for f in feeds):
+            return jsonify({"error": "Flux déjà présent", "feed_url": feed_url}), 409
+
+        feeds.append({'name': name, 'url': feed_url, 'tags': tags, 'section': section})
         try:
-            time.sleep(1)
-            results = _search_via_lite(test_query, 3)
-            out["strategies_tried"].append({
-                "name": "lite (scraping)", "ok": True, "results": len(results),
-                "sample_title": (results[0]["title"][:80] if results else None)
-            })
+            _save_feeds_to_vault(vault, feeds)
         except Exception as e:
-            out["strategies_tried"].append({"name": "lite (scraping)", "ok": False, "error": str(e)[:200]})
-        try:
-            time.sleep(1)
-            results = _search_via_searxng(test_query, 3)
-            out["strategies_tried"].append({
-                "name": "searxng (meta)", "ok": True, "results": len(results),
-                "sample_title": (results[0]["title"][:80] if results else None)
-            })
-        except Exception as e:
-            out["strategies_tried"].append({"name": "searxng (meta)", "ok": False, "error": str(e)[:200]})
-        out["elapsed_ms"] = int((time.time() - t0) * 1000)
-        out["ok"] = any(s.get("ok") and s.get("results", 0) > 0 for s in out["strategies_tried"])
-        return jsonify(out)
+            return jsonify({"error": f"Écriture impossible : {e}"}), 500
 
-    @app.route("/api/ddg/search", methods=["GET"])
-    def ddg_search():
-        q = request.args.get("q", "").strip()
-        n = int(request.args.get("n", 10))
-        if not q: return jsonify({"error": "Requête vide"}), 400
-        try:
-            return jsonify({"query": q, "results": _search_ddg(q, n)})
-        except Exception as e:
-            return jsonify({"error": f"DDG : {str(e)[:400]}"}), 500
+        return jsonify({"ok": True, "feed": {
+            "name": name, "url": feed_url, "tags": tags,
+            "original_url": url if url != feed_url else None
+        }})
 
-    @app.route("/api/ddg/agentic", methods=["POST"])
-    def ddg_agentic():
-        cfg = rd_cfg()
-        if not cfg.get("api_key"): return jsonify({"error": "Clé API manquante"}), 400
-        d = request.json
-        content    = (d.get("content", "") or "")[:4000]
-        fname      = d.get("name", "note")
-        hint       = (d.get("hint", "") or "").strip()
-        n_res      = int(d.get("n", 10))
-        fetch_full = bool(d.get("fetch_full", True))  # ← option B activée par défaut
-        n_fetch    = int(d.get("n_fetch", 5))         # ← top 5 par défaut
+    @app.route("/api/rss/remove", methods=["POST"])
+    def rss_remove():
+        d = request.json or {}
+        url = (d.get('url') or '').strip()
+        if not url:
+            return jsonify({"error": "URL manquante"}), 400
+        vault = _vault_root()
+        feeds = _load_feeds_from_vault(vault)
+        new_feeds = [f for f in feeds if f['url'] != url]
+        if len(new_feeds) == len(feeds):
+            return jsonify({"error": "Flux non trouvé"}), 404
+        _save_feeds_to_vault(vault, new_feeds)
+        return jsonify({"ok": True})
 
-        prompt = (
-            f'À partir du fichier "{fname}" ci-dessous, génère UNE requête web optimale '
-            f'(5-12 mots-clés, français ou anglais selon ce qui maximisera les résultats). '
-            f'Opérateurs autorisés : "site:", "filetype:", guillemets pour expressions exactes. '
-            f'Réponds UNIQUEMENT avec la requête, sans guillemets autour ni explication.\n\n'
-            f'=== DÉBUT DU FICHIER ===\n{content}\n=== FIN ==='
-        )
-        if hint: prompt += f"\n\nIndication de l'utilisateur (à prioriser) : {hint}"
+    @app.route("/api/rss/fetch", methods=["POST"])
+    def rss_fetch():
+        d = request.json or {}
+        feed_urls   = d.get('feed_urls') or []
+        hours_back  = int(d.get('hours_back', 24))     # 0 = pas de filtre
+        fetch_full  = bool(d.get('fetch_full', True))
+        max_items   = int(d.get('max_items', 10))
 
-        query, err = _ai_call(cfg, [
-            {"role": "system", "content": "Tu génères des requêtes de moteur de recherche optimales. Pas d'explications."},
-            {"role": "user",   "content": prompt}
-        ], max_tokens=150, temp=0.3)
-        if err: return jsonify({"error": f"IA (génération requête) : {err}"}), 500
-        query = (query or "").strip().strip('"').strip("'").replace("\n", " ")[:200]
-        if not query: return jsonify({"error": "L'IA n'a pas généré de requête"}), 500
+        if not feed_urls:
+            return jsonify({"error": "Aucun flux sélectionné"}), 400
 
-        try:
-            results = _search_ddg(query, n_res)
-        except Exception as e:
-            return jsonify({"error": f"DDG : {type(e).__name__}: {str(e)[:400]}", "query": query}), 500
+        all_feeds_meta = {f['url']: f for f in _load_feeds_from_vault(_vault_root())}
+        cutoff = datetime.utcnow() - timedelta(hours=hours_back) if hours_back > 0 else None
 
-        # Option B : fetch parallèle du contenu complet pour les top n_fetch
+        # Fetch parallèle des flux
+        def _fetch_one(url):
+            try:
+                return url, _fetch_feed(url, max_items=50), None
+            except Exception as e:
+                return url, None, str(e)[:200]
+
+        results = []
+        all_articles = []
+        with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as ex:
+            futs = [ex.submit(_fetch_one, u) for u in feed_urls]
+            for fut in as_completed(futs):
+                feed_url, items, err = fut.result()
+                meta = all_feeds_meta.get(feed_url,
+                                          {'name': _domain_name(feed_url), 'url': feed_url, 'tags': []})
+                if err:
+                    results.append({**meta, 'error': err, 'items': [], 'count': 0})
+                    continue
+                # Filtrer par date
+                if cutoff:
+                    items = [it for it in items
+                             if it.get('date_parsed') is None or it['date_parsed'] >= cutoff]
+                # Limiter
+                items = items[:max_items]
+                # Marquer la provenance
+                for it in items:
+                    it['feed_name'] = meta['name']
+                    it['feed_url']  = feed_url
+                    it['feed_tags'] = meta.get('tags', [])
+                results.append({**meta, 'items': items, 'count': len(items)})
+                all_articles.extend(items)
+
+        # Fetch parallèle du contenu complet
         fetched_count = 0
-        if fetch_full and results:
-            results = _fetch_pages_parallel(results, min(n_fetch, len(results)))
-            fetched_count = sum(1 for r in results if r.get("fetch_status") == "ok")
+        if fetch_full and all_articles:
+            all_articles = _fetch_articles_parallel(all_articles)
+            fetched_count = sum(1 for it in all_articles if it.get('fetch_status') == 'ok')
 
+        total = sum(len(r.get('items', [])) for r in results)
         return jsonify({
-            "query": query,
-            "results": results,
-            "count": len(results),
-            "fetched_count": fetched_count,
+            "feeds": results,
+            "total_articles": total,
+            "fetched_full": fetched_count,
+            "filter_hours": hours_back,
             "fetch_full": fetch_full,
         })
 
-    @app.route("/api/ddg/synthesize", methods=["POST"])
-    def ddg_synthesize():
+    @app.route("/api/rss/analyze", methods=["POST"])
+    def rss_analyze():
         cfg = rd_cfg()
-        if not cfg.get("api_key"): return jsonify({"error": "Clé API manquante"}), 400
-        d = request.json
-        results        = d.get("results", [])
-        content        = (d.get("content", "") or "")[:3000]
-        fname          = d.get("name", "note")
-        query          = d.get("query", "")
-        question       = (d.get("question", "") or "").strip()
-        user_sys       = (d.get("system_prompt", "") or "").strip()
-        if not results: return jsonify({"error": "Aucun résultat à synthétiser"}), 400
+        if not cfg.get("api_key"):
+            return jsonify({"error": "Clé API manquante"}), 400
 
-        # Construire le bloc des résultats — full_content si dispo, sinon snippet
-        res_parts = []
-        for i, r in enumerate(results):
-            full = r.get("full_content")
-            if full:
-                label = f"Contenu de la page ({len(full)} chars)"
-                body  = full[:3500]   # limite par source pour respect budget tokens
-            else:
-                label = f"Snippet uniquement ({r.get('fetch_status','non récupéré')})"
-                body  = r.get("snippet", "")[:600]
-            res_parts.append(
-                f"### [{i+1}] {r.get('title','(sans titre)')}\n"
-                f"**URL** : {r.get('url','')}\n"
-                f"**{label}** :\n{body}"
-            )
-        res_md = "\n\n".join(res_parts)
+        d = request.json or {}
+        feeds_data = d.get('feeds') or []
+        question   = (d.get('question') or '').strip()
+        user_sys   = (d.get('system_prompt') or '').strip()
+        mode       = (d.get('mode') or 'together').strip()  # 'together' | 'per_feed'
 
-        # Construire le user_prompt selon présence d'une question
-        if question:
-            user_prompt = (
-                f"=== OBJECTIF / QUESTION DE L'UTILISATEUR ===\n{question}\n=== FIN OBJECTIF ===\n\n"
-                f"Réponds **précisément** à l'objectif/question ci-dessus en t'appuyant sur les sources "
-                f"web fournies. N'imite pas un template — adapte ta structure à ce qui est demandé. "
-                f"Cite chaque source qui contribue avec son numéro [1], [2], etc. "
-                f"Si une source est incomplète (snippet uniquement), signale-le. "
-                f"Si aucune source ne permet de répondre, dis-le explicitement plutôt que de combler par des généralités.\n\n"
-                f"=== MON FICHIER DE TRAVAIL \"{fname}\" (contexte) ===\n{content}\n=== FIN ===\n\n"
-                f"=== {len(results)} RÉSULTATS WEB (requête : `{query}`) ===\n{res_md}\n=== FIN ===\n\n"
-                f"Termine par une section **## Sources** listant tous les liens cités."
-            )
-        else:
-            # Template par défaut (comportement historique mais avec contenu réel)
-            user_prompt = (
-                f"Voici {len(results)} résultats web trouvés via DuckDuckGo avec la requête `{query}`, "
-                f"en lien avec mon fichier \"{fname}\".\n\n"
-                f"Produis une synthèse en français (Markdown structuré) qui :\n"
-                f"1. Identifie les **points-clés** qui ressortent du corpus web\n"
-                f"2. Souligne **convergences et contradictions** entre les sources\n"
-                f"3. Évalue brièvement la **qualité épistémique** (sources primaires vs secondaires, opinions vs faits)\n"
-                f"4. Identifie les **liens avec mon fichier d'origine**\n"
-                f"5. Propose 2-3 **angles à creuser** ensuite\n\n"
-                f"Cite chaque source avec son numéro [1], [2], etc.\n"
-                f"Termine par une section **## Sources** listant tous les liens cités avec leur titre.\n\n"
-                f"=== MON FICHIER \"{fname}\" ===\n{content}\n=== FIN ===\n\n"
-                f"=== RÉSULTATS WEB ===\n{res_md}\n=== FIN ==="
-            )
+        if not feeds_data:
+            return jsonify({"error": "Aucun article à analyser"}), 400
 
-        default_sys = ("Tu es analyste expert en synthèse de sources web. "
-                       "Tu écris en français, en Markdown structuré, avec rigueur épistémique. "
-                       "Tu ne paraphrases pas en généralités quand la matière manque — tu le dis.")
+        default_sys = (
+            "Tu es analyste expert en veille informationnelle et synthèse de presse. "
+            "Tu écris en français, en Markdown structuré, avec rigueur épistémique. "
+            "Tu ne paraphrases pas en généralités quand la matière manque — tu le dis."
+        )
         system = user_sys or default_sys
 
-        synthesis, err = _ai_call(cfg, [
-            {"role": "system", "content": system},
-            {"role": "user",   "content": user_prompt}
-        ], max_tokens=2500, temp=0.5, timeout=240)
-        if err: return jsonify({"error": f"IA (synthèse) : {err}"}), 500
-        return jsonify({
-            "synthesis": synthesis,
-            "used_full_content": sum(1 for r in results if r.get("full_content")),
-            "used_snippet_only": sum(1 for r in results if not r.get("full_content")),
-        })
+        def _articles_md(items, max_per=1500):
+            parts = []
+            for i, it in enumerate(items):
+                full = it.get('full_content')
+                if full:
+                    body = full[:max_per]
+                    label = f"Contenu ({len(full)} chars, tronqué à {max_per})"
+                else:
+                    body = (it.get('description') or '')[:600]
+                    label = f"Description (snippet) — fetch_status: {it.get('fetch_status', 'non récupéré')}"
+                # date_parsed peut être un datetime (appel interne) OU une str (round-trip JSON)
+                dp = it.get('date_parsed')
+                if isinstance(dp, datetime):
+                    date_s = dp.strftime('%Y-%m-%d %H:%M')
+                elif isinstance(dp, str) and dp:
+                    # JSON-sérialisé par Flask : on prend les 16 premiers caractères
+                    date_s = dp[:16].replace('T', ' ')
+                else:
+                    date_s = it.get('date_str') or '?'
+                src = it.get('feed_name', '?')
+                parts.append(
+                    f"### [{i+1}] {it.get('title', '(sans titre)')}\n"
+                    f"**Source** : {src} · {date_s}\n"
+                    f"**URL** : {it.get('link', '')}\n"
+                    f"**{label}** :\n{body}"
+                )
+            return "\n\n".join(parts)
+
+        # ── MODE 1 : tous flux ensemble ──
+        if mode == 'together':
+            all_items = []
+            for f in feeds_data:
+                all_items.extend(f.get('items', []))
+            if not all_items:
+                return jsonify({"error": "Aucun article dans les flux fournis"}), 400
+
+            articles_md = _articles_md(all_items)
+            prompt_chars = len(articles_md)
+            print(f"[RSS] Analyse 'together' : {len(all_items)} articles, ~{prompt_chars} chars dans le prompt")
+
+            if question:
+                user_prompt = (
+                    f"=== OBJECTIF / QUESTION DE L'UTILISATEUR ===\n{question}\n=== FIN ===\n\n"
+                    f"Tu vas analyser {len(all_items)} articles issus de {len(feeds_data)} flux RSS. "
+                    f"Réponds **précisément** à l'objectif/question ci-dessus. Adapte ta structure à ce qui est demandé. "
+                    f"Cite chaque article qui contribue par son numéro [1], [2], etc. "
+                    f"Si une source est incomplète, signale-le. Si aucune ne permet de répondre, dis-le explicitement.\n\n"
+                    f"=== ARTICLES ===\n{articles_md}\n=== FIN ===\n\n"
+                    f"Termine par une section **## Sources** listant tous les liens cités."
+                )
+            else:
+                user_prompt = (
+                    f"Voici {len(all_items)} articles issus de {len(feeds_data)} flux RSS.\n\n"
+                    f"Produis une synthèse en français (Markdown structuré) qui :\n"
+                    f"1. Identifie les **thèmes majeurs** qui ressortent du corpus\n"
+                    f"2. Souligne **convergences et contradictions** entre les sources\n"
+                    f"3. Repère les **signaux faibles** ou angles morts\n"
+                    f"4. Évalue la **qualité épistémique** (sources primaires/secondaires, opinions/faits)\n"
+                    f"5. Propose 2-3 **angles à creuser** ensuite\n\n"
+                    f"Cite chaque source avec son numéro [1], [2], etc.\n"
+                    f"Termine par une section **## Sources** listant tous les liens cités.\n\n"
+                    f"=== ARTICLES ===\n{articles_md}\n=== FIN ==="
+                )
+
+            t_ai = time.time()
+            synthesis, err = _ai_call(cfg, [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_prompt}
+            ], max_tokens=2200, temp=0.5, timeout=180)
+            ai_duration = time.time() - t_ai
+            print(f"[RSS] Appel IA terminé en {ai_duration:.1f}s — err={err!r}")
+            if err: return jsonify({"error": f"IA ({ai_duration:.0f}s) : {err}"}), 500
+
+            return jsonify({
+                "mode": "together",
+                "synthesis": synthesis,
+                "stats": {
+                    "feeds": len(feeds_data),
+                    "articles": len(all_items),
+                    "with_full_content": sum(1 for it in all_items if it.get('full_content')),
+                }
+            })
+
+        # ── MODE 2 : flux par flux ──
+        syntheses = []
+        for f in feeds_data:
+            items = f.get('items', [])
+            if not items:
+                syntheses.append({
+                    'feed_name': f.get('name'),
+                    'feed_url':  f.get('url'),
+                    'synthesis': None,
+                    'error': 'Aucun article',
+                    'article_count': 0,
+                })
+                continue
+
+            articles_md = _articles_md(items, max_per=1200)
+
+            if question:
+                up = (
+                    f"=== OBJECTIF / QUESTION ===\n{question}\n=== FIN ===\n\n"
+                    f"Analyse spécifiquement les articles du flux **{f.get('name')}** ({len(items)} articles). "
+                    f"Réponds précisément à l'objectif. Cite chaque article par son numéro [1], [2].\n\n"
+                    f"=== ARTICLES ===\n{articles_md}\n=== FIN ==="
+                )
+            else:
+                up = (
+                    f"Synthèse du flux **{f.get('name')}** ({len(items)} articles).\n"
+                    f"Markdown structuré, français.\n"
+                    f"Identifie : thèmes majeurs, points-clés, signaux faibles, biais éventuels.\n"
+                    f"Cite par [N].\n\n"
+                    f"=== ARTICLES ===\n{articles_md}\n=== FIN ==="
+                )
+
+            t_ai = time.time()
+            print(f"[RSS] Per-feed analyse '{f.get('name')}' : {len(items)} articles, ~{len(articles_md)} chars")
+            synth, err = _ai_call(cfg, [
+                {"role": "system", "content": system},
+                {"role": "user", "content": up}
+            ], max_tokens=1500, temp=0.5, timeout=150)
+            print(f"[RSS] Per-feed '{f.get('name')}' terminé en {time.time()-t_ai:.1f}s")
+
+            syntheses.append({
+                'feed_name': f.get('name'),
+                'feed_url':  f.get('url'),
+                'synthesis': synth if not err else None,
+                'error': err,
+                'article_count': len(items),
+                'with_full_content': sum(1 for it in items if it.get('full_content')),
+            })
+
+        return jsonify({"mode": "per_feed", "syntheses": syntheses})

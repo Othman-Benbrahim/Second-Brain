@@ -1,211 +1,335 @@
-// ════════════════════════════════════════════════════════
-//  Plugin DuckDuckGo — recherche web agentique
-// ════════════════════════════════════════════════════════
-var DDG = {query:'', results:[], synthesis:'', fname:''};
+// ══════════════════════════════════════════════════════════════
+//  Plugin RSS — gestion + analyse de flux
+// ══════════════════════════════════════════════════════════════
 
-function openDuckDuckGo(){
-  if(!ACTIVE){ toast('Ouvrez d\'abord un fichier .md'); return; }
-  DDG = {query:'', results:[], synthesis:'', question:'', sysPrompt:'',
-    fname: ACTIVE.split(/[/\\]/).pop().replace(/\.md$/i,'')};
-  $('ddg-hint').value = '';
-  $('ddg-question').value = '';
-  $('ddg-sys-prompt').value = '';
-  if($('ddg-fetch-full')) $('ddg-fetch-full').checked = true;
-  $('ddg-form').style.display = 'block';
-  $('ddg-progress').style.display = 'none';
-  $('ddg-results').style.display = 'none';
-  $('ddg-error').style.display = 'none';
-  $('ddg-edit-query').style.display = 'none';
-  $('ddg-retry-search').style.display = 'none';
-  $('ddg-syn-block').style.display = 'none';
-  $('ddg-save-btn').style.display = 'none';
-  $('ddg-syn-btn').disabled = false;
-  $('ddg-syn-btn').textContent = '✨ Synthétiser';
-  $('mddg').classList.add('on');
+var RSS = {
+  feeds: [],            // [{name, url, tags, section}]
+  fetchedFeeds: null,   // résultat du /api/rss/fetch
+  syntheses: null,      // résultat du /api/rss/analyze
+  mode: 'together',
+  question: '',
+  sysPrompt: '',
+  // État d'exécution
+  abortCtrl: null,      // AbortController pour annuler la requête en cours
+  startTime: 0,         // Date.now() au début de l'analyse
+  timerId: null,        // setInterval qui rafraîchit le chronomètre
+};
+
+function openRSS(){
+  $('mrss').classList.add('on');
+  rssSwitchTab('manage');
+  rssReloadList();
+}
+function closeRSS(){
+  rssAbortRunning();
+  $('mrss').classList.remove('on');
 }
 
-function closeDuckDuckGo(){
-  $('mddg').classList.remove('on');
-}
-
-function setDDGStep(n, state){
-  var el = $('ddg-step'+n);
-  el.classList.remove('muted','done','fail');
-  var labels = {
-    1: {a:'⏳ Étape 1/3 — L\'IA génère la requête…',  d:'✓ Requête générée',         f:'✗ Échec génération requête'},
-    2: {a:'⏳ Étape 2/3 — Interrogation de DuckDuckGo…', d:'✓ Résultats récupérés',     f:'✗ Échec DuckDuckGo'},
-    3: {a:'⏳ Étape 3/3 — Synthèse en cours…',           d:'✓ Synthèse produite',       f:'✗ Échec synthèse'}
-  };
-  if(state==='active'){ el.textContent = labels[n].a; }
-  else if(state==='done'){ el.textContent = labels[n].d; el.classList.add('done'); }
-  else if(state==='fail'){ el.textContent = labels[n].f; el.classList.add('fail'); }
-  else { el.textContent = '○ Étape '+n+'/3'; el.classList.add('muted'); }
-}
-
-async function runDDG(){
-  if(!ACTIVE){ toast('Aucun fichier ouvert'); return; }
-  var content = $('md-editor').value;
-  var name    = ACTIVE.split(/[/\\]/).pop();
-  var hint    = $('ddg-hint').value.trim();
-  var n       = parseInt($('ddg-n').value);
-  var fetchFull = $('ddg-fetch-full') ? $('ddg-fetch-full').checked : true;
-
-  $('ddg-form').style.display = 'none';
-  $('ddg-progress').style.display = 'block';
-  $('ddg-error').style.display = 'none';
-  setDDGStep(1,'active'); setDDGStep(2,'pending'); setDDGStep(3,'pending');
-  if(fetchFull){
-    setTimeout(function(){
-      if($('ddg-step2').classList.contains('muted')) return;
-      $('ddg-step2').textContent = '⏳ Étape 2/3 — DDG + lecture des pages (peut prendre 10-20 s)…';
-    }, 1500);
+function rssAbortRunning(){
+  if(RSS.abortCtrl){
+    try { RSS.abortCtrl.abort(); } catch(e){}
+    RSS.abortCtrl = null;
   }
+  if(RSS.timerId){
+    clearInterval(RSS.timerId);
+    RSS.timerId = null;
+  }
+}
 
-  var r = await post('/api/ddg/agentic', {content:content, name:name, hint:hint, n:n,
-    fetch_full: fetchFull, n_fetch: 5});
+function rssFormatElapsed(ms){
+  var s = Math.floor(ms / 1000);
+  var m = Math.floor(s / 60);
+  s = s % 60;
+  return (m > 0 ? m+' min ' : '') + s + ' s';
+}
 
-  if(r.error){
-    $('ddg-error-msg').textContent = r.error;
-    $('ddg-error').style.display = 'block';
-    if(r.query){
-      setDDGStep(1,'done'); setDDGStep(2,'fail');
-      DDG.query = r.query;
-      $('ddg-query-edit').value = r.query;
-      $('ddg-edit-query').style.display = 'block';
-      $('ddg-retry-search').style.display = 'inline-flex';
-    } else {
-      setDDGStep(1,'fail');
-      $('ddg-edit-query').style.display = 'none';
-      $('ddg-retry-search').style.display = 'none';
-    }
-    toast('⚠ Échec — voir détail dans le panneau', 4000);
+function rssSwitchTab(t){
+  $('rss-tab-manage').classList.toggle('on', t==='manage');
+  $('rss-tab-analyze').classList.toggle('on', t==='analyze');
+  $('rss-pane-manage').style.display  = t==='manage'  ? 'block' : 'none';
+  $('rss-pane-analyze').style.display = t==='analyze' ? 'block' : 'none';
+  if(t==='analyze'){
+    rssRenderAnalyzeList();
+    // Reset l'affichage des résultats à chaque ouverture de l'onglet
+    $('rss-result-block').style.display = 'none';
+    $('rss-save-btn').style.display = 'none';
+  }
+}
+
+// ─── ONGLET 1 : Gestion ───────────────────────────────────────
+
+async function rssReloadList(){
+  $('rss-feeds-list').innerHTML = '<div style="padding:20px;text-align:center;color:var(--tx2);font-size:12px">Chargement…</div>';
+  var r = await fetch('/api/rss/list').then(function(r){return r.json();});
+  RSS.feeds = r.feeds || [];
+  $('rss-feeds-count').textContent = RSS.feeds.length;
+  $('rss-vault-file').textContent = r.vault_file || 'flux-rss.md';
+  rssRenderFeedsList();
+}
+
+function rssRenderFeedsList(){
+  if(!RSS.feeds.length){
+    $('rss-feeds-list').innerHTML = '<div style="padding:20px;text-align:center;color:var(--tx2);font-size:12px">Aucun flux enregistré. Ajoutez-en un ci-dessus.</div>';
     return;
   }
-
-  setDDGStep(1,'done'); setDDGStep(2,'done');
-  DDG.query = r.query;
-  DDG.results = r.results || [];
-
-  $('ddg-results').style.display = 'block';
-  $('ddg-query').textContent = r.query;
-  $('ddg-count').textContent = DDG.results.length;
-  // Indicateur méta sur le fetch
-  if(r.fetch_full){
-    var info = ' · 📖 ' + (r.fetched_count||0) + '/' + Math.min(5, DDG.results.length) + ' pages lues';
-    $('ddg-fetch-info').textContent = info;
-  } else {
-    $('ddg-fetch-info').textContent = ' · snippets uniquement';
-  }
-  renderDDGResults(DDG.results);
-  if(!DDG.results.length) toast('Aucun résultat trouvé', 4000);
-  // Focus sur la question pour inciter l'utilisateur à la remplir
-  setTimeout(function(){ if($('ddg-question')) $('ddg-question').focus(); }, 100);
-}
-
-async function retryDDGSearch(){
-  var q = $('ddg-query-edit').value.trim();
-  if(!q){ toast('Requête vide'); return; }
-  var n = parseInt($('ddg-n').value);
-  DDG.query = q;
-
-  $('ddg-error').style.display = 'none';
-  $('ddg-progress').style.display = 'block';
-  setDDGStep(1,'done'); setDDGStep(2,'active'); setDDGStep(3,'pending');
-
-  var r = await fetch('/api/ddg/search?q='+encodeURIComponent(q)+'&n='+n).then(function(r){return r.json();});
-  if(r.error){
-    setDDGStep(2,'fail');
-    $('ddg-error-msg').textContent = r.error;
-    $('ddg-error').style.display = 'block';
-    $('ddg-edit-query').style.display = 'block';
-    $('ddg-retry-search').style.display = 'inline-flex';
-    toast('⚠ DDG encore en échec', 4000);
-    return;
-  }
-  DDG.results = r.results || [];
-  setDDGStep(2,'done');
-  $('ddg-results').style.display = 'block';
-  $('ddg-query').textContent = q;
-  $('ddg-count').textContent = DDG.results.length;
-  renderDDGResults(DDG.results);
-  if(!DDG.results.length) toast('Aucun résultat', 4000);
-}
-
-function renderDDGResults(results){
-  if(!results.length){
-    $('ddg-list').innerHTML = '<div style="padding:14px;color:var(--tx2);font-size:12px;text-align:center">Aucun résultat pour cette requête. Affinez l\'indication et relancez.</div>';
-    return;
-  }
-  $('ddg-list').innerHTML = results.map(function(r,i){
-    var safeUrl = esc(r.url||'');
-    var domain = '';
-    try { domain = new URL(r.url).hostname.replace(/^www\./,''); } catch(e){ domain = r.url; }
-    // Badge fetch
-    var badge = '';
-    if(r.fetch_status === 'ok'){
-      badge = '<span style="color:var(--grn);font-size:10px;margin-left:6px">📖 lu (' + (r.fetch_chars||0) + ' chars)</span>';
-    } else if(r.fetch_status && r.fetch_status !== 'non récupéré'){
-      badge = '<span style="color:var(--red);font-size:10px;margin-left:6px;opacity:.7" title="'+esc(r.fetch_status)+'">⚠ '+esc(r.fetch_status.substring(0,25))+'</span>';
-    } else if(r.fetch_status === 'non récupéré'){
-      badge = '<span style="color:var(--tx2);font-size:10px;margin-left:6px">○ snippet seul</span>';
-    }
-    return '<div class="ddg-item">'
-      + '<div class="ddg-item-title"><span class="ddg-item-num">['+(i+1)+']</span><a href="'+safeUrl+'" target="_blank" rel="noopener">'+esc(r.title||'(sans titre)')+'</a>'+badge+'</div>'
-      + '<div class="ddg-item-url"><a href="'+safeUrl+'" target="_blank" rel="noopener">'+esc(domain)+'</a></div>'
-      + '<div class="ddg-item-snippet">'+esc(r.snippet||'')+'</div>'
-      + '</div>';
-  }).join('');
-}
-
-async function synthesizeDDG(){
-  if(!DDG.results.length){ toast('Pas de résultats à synthétiser'); return; }
-  var question  = $('ddg-question').value.trim();
-  var sysPrompt = $('ddg-sys-prompt').value.trim();
-  DDG.question  = question;
-  DDG.sysPrompt = sysPrompt;
-
-  setDDGStep(3,'active');
-  $('ddg-step3').textContent = '⏳ Étape 3/3 — Synthèse… (peut prendre 1-3 min)';
-  $('ddg-syn-btn').disabled = true;
-  $('ddg-syn-btn').textContent = '⏳ Synthèse en cours…';
-  $('ddg-error').style.display = 'none';
-
-  var r = await post('/api/ddg/synthesize', {
-    results: DDG.results, content: $('md-editor').value,
-    name: ACTIVE.split(/[/\\]/).pop(), query: DDG.query,
-    question: question, system_prompt: sysPrompt
+  // Regrouper par section
+  var sections = {};
+  RSS.feeds.forEach(function(f){
+    var s = f.section || '(Sans section)';
+    if(!sections[s]) sections[s] = [];
+    sections[s].push(f);
   });
-  if(r.error){
-    setDDGStep(3,'fail');
-    $('ddg-error-msg').textContent = r.error;
-    $('ddg-error').style.display = 'block';
-    $('ddg-syn-btn').disabled = false;
-    $('ddg-syn-btn').textContent = '🔄 Réessayer la synthèse';
-    toast('⚠ '+r.error.substring(0,80), 5000);
-    return;
-  }
-  DDG.synthesis = r.synthesis;
-  setDDGStep(3,'done');
-  $('ddg-syn-block').style.display = 'block';
-  // Méta sur la qualité de la matière utilisée
-  var meta = '';
-  if(r.used_full_content !== undefined){
-    meta = ' · ' + r.used_full_content + ' page(s) lue(s), ' + r.used_snippet_only + ' snippet(s) seul(s)';
-    if(question) meta += ' · question ciblée';
-  }
-  $('ddg-syn-meta').textContent = meta;
-  $('ddg-synthesis').textContent = r.synthesis;
-  $('ddg-save-btn').style.display = 'inline-flex';
-  $('ddg-syn-btn').style.display = 'none';
+  var html = '';
+  Object.keys(sections).sort().forEach(function(s){
+    if(s !== '(Sans section)') html += '<div style="font-size:11px;color:var(--acc);font-weight:600;margin:10px 0 6px 4px;text-transform:uppercase;letter-spacing:.5px">'+esc(s)+'</div>';
+    sections[s].forEach(function(f){
+      var tagsHtml = (f.tags||[]).map(function(t){return '<span class="rss-tag">#'+esc(t)+'</span>';}).join('');
+      var safeUrl = esc(f.url);
+      var domain = '';
+      try { domain = new URL(f.url).hostname.replace(/^www\./,''); } catch(e){ domain = f.url; }
+      html += '<div class="rss-feed-row">'
+        + '<div style="flex:1;min-width:0">'
+        + '<div class="rss-feed-name">'+esc(f.name)+' '+tagsHtml+'</div>'
+        + '<div class="rss-feed-meta"><a href="'+safeUrl+'" target="_blank" rel="noopener" style="color:var(--tx2);text-decoration:none">'+esc(domain)+'</a></div>'
+        + '</div>'
+        + '<button class="btn bs" onclick="rssRemoveFeed(\''+f.url.replace(/'/g,"\\'")+'\')" title="Supprimer" style="width:auto;padding:4px 8px;font-size:11px;color:var(--red)">🗑</button>'
+        + '</div>';
+    });
+  });
+  $('rss-feeds-list').innerHTML = html;
 }
 
-async function saveDDGAsFile(){
-  if(!DDG.synthesis){ toast('Pas de synthèse à sauver'); return; }
-  // Nom basé sur la question si présente, sinon sur le fichier source
-  var slugBase = DDG.question
-    ? DDG.question.substring(0,40).replace(/[^\w\sàâäéèêëïîôöùûüç-]/gi,'').replace(/\s+/g,'-').toLowerCase()
-    : DDG.fname;
-  var base = safeFileName('ddg-' + slugBase);
+async function rssAddFeed(){
+  var url = $('rss-add-url').value.trim();
+  var tagsRaw = $('rss-add-tags').value.trim();
+  if(!url){ toast('URL manquante'); return; }
+  var tags = (tagsRaw.match(/#?[\w-]+/g) || []).map(function(t){return t.replace(/^#/,'').toLowerCase();});
+
+  $('rss-add-btn').disabled = true;
+  $('rss-add-btn').textContent = '⏳ Découverte…';
+  var st = $('rss-add-status');
+  st.style.display = 'block';
+  st.textContent = '🔍 Recherche du flux RSS (auto-discovery + chemins courants)…';
+
+  var r = await post('/api/rss/add', {url: url, tags: tags});
+
+  $('rss-add-btn').disabled = false;
+  $('rss-add-btn').textContent = '➕ Ajouter';
+
+  if(r.error){
+    st.style.color = 'var(--red)';
+    st.textContent = '⚠ '+r.error;
+    toast('⚠ '+r.error.substring(0,80), 4000);
+    return;
+  }
+
+  st.style.color = 'var(--grn)';
+  var msg = '✓ Ajouté : '+r.feed.name+' → '+r.feed.url;
+  if(r.feed.original_url) msg += ' (depuis '+r.feed.original_url+')';
+  st.textContent = msg;
+  $('rss-add-url').value = '';
+  $('rss-add-tags').value = '';
+  rssReloadList();
+  toast('✓ Flux ajouté');
+}
+
+async function rssRemoveFeed(url){
+  if(!confirm('Retirer ce flux de la liste ?')) return;
+  var r = await post('/api/rss/remove', {url: url});
+  if(r.error){ toast('⚠ '+r.error); return; }
+  rssReloadList();
+  toast('✓ Flux retiré');
+}
+
+// ─── ONGLET 2 : Analyser ───────────────────────────────────────
+
+function rssRenderAnalyzeList(){
+  if(!RSS.feeds.length){
+    $('rss-analyze-feeds-list').innerHTML = '<div style="padding:16px;text-align:center;color:var(--tx2);font-size:12px">Aucun flux enregistré — ajoutez-en dans l\'onglet « Mes flux ».</div>';
+    return;
+  }
+  var html = '';
+  RSS.feeds.forEach(function(f, idx){
+    var safeUrl = esc(f.url);
+    var tagsHtml = (f.tags||[]).map(function(t){return '<span class="rss-tag">#'+esc(t)+'</span>';}).join('');
+    html += '<label style="display:flex;align-items:center;gap:8px;padding:5px 4px;cursor:pointer;font-size:12px;color:var(--tx);border-bottom:1px solid var(--bdr)">'
+      + '<input type="checkbox" class="rss-feed-check" data-url="'+safeUrl+'" checked style="accent-color:var(--acc)">'
+      + '<span style="flex:1">'+esc(f.name)+' '+tagsHtml+'</span>'
+      + '<span style="font-family:var(--mono);font-size:10px;color:var(--tx2)">'+esc(f.url.length>50 ? f.url.slice(0,50)+'…' : f.url)+'</span>'
+      + '</label>';
+  });
+  $('rss-analyze-feeds-list').innerHTML = html;
+}
+
+function rssSelectAll(checked){
+  document.querySelectorAll('.rss-feed-check').forEach(function(cb){ cb.checked = checked; });
+}
+
+function rssGetSelectedFeeds(){
+  return Array.from(document.querySelectorAll('.rss-feed-check'))
+    .filter(function(cb){return cb.checked;})
+    .map(function(cb){return cb.dataset.url;});
+}
+
+async function rssRunAnalysis(){
+  var feedUrls = rssGetSelectedFeeds();
+  if(!feedUrls.length){ toast('Cochez au moins un flux'); return; }
+
+  var hours      = parseInt($('rss-hours').value);
+  var maxItems   = parseInt($('rss-max-items').value);
+  var fetchFull  = $('rss-fetch-full').checked;
+  var modeEl     = document.querySelector('input[name="rss-mode"]:checked');
+  var mode       = modeEl ? modeEl.value : 'together';
+  var question   = $('rss-question').value.trim();
+  var sysPrompt  = $('rss-sys-prompt').value.trim();
+
+  RSS.mode = mode;
+  RSS.question = question;
+  RSS.sysPrompt = sysPrompt;
+  RSS.startTime = Date.now();
+  RSS.abortCtrl = new AbortController();
+
+  // UI : passer en mode "en cours"
+  $('rss-run-btn').textContent = '⏹ Annuler';
+  $('rss-run-btn').onclick = function(){ rssCancelAnalysis(); };
+  $('rss-progress').style.display = 'block';
+  $('rss-result-block').style.display = 'none';
+  $('rss-save-btn').style.display = 'none';
+
+  // Démarrer le chronomètre (mise à jour toutes les 1 s)
+  var currentStep = 'fetch';  // 'fetch' | 'analyze'
+  RSS.timerId = setInterval(function(){
+    var elapsed = rssFormatElapsed(Date.now() - RSS.startTime);
+    if(currentStep === 'fetch'){
+      $('rss-progress-step').textContent = '⏳ Étape 1/2 — Fetch des flux'
+        + (fetchFull ? ' + lecture des articles' : '')
+        + ' · ' + elapsed + ' écoulées';
+    } else {
+      $('rss-progress-step').textContent = '⏳ Étape 2/2 — Synthèse IA en cours · ' + elapsed + ' écoulées'
+        + ' (l\'IA peut mettre 30 s à 3 min selon le modèle ; vous pouvez annuler ci-dessous)';
+    }
+  }, 1000);
+
+  // ── ÉTAPE 1 : FETCH ──
+  try {
+    var fr = await rssFetchWithAbort('/api/rss/fetch', {
+      feed_urls:  feedUrls,
+      hours_back: hours,
+      fetch_full: fetchFull,
+      max_items:  maxItems,
+    });
+
+    if(fr.error){
+      rssEndAnalysis();
+      toast('⚠ Fetch : '+fr.error.substring(0,100), 5000);
+      return;
+    }
+    RSS.fetchedFeeds = fr.feeds;
+
+    if(fr.total_articles === 0){
+      rssEndAnalysis();
+      toast('⚠ Aucun article dans la fenêtre temporelle choisie', 5000);
+      return;
+    }
+
+    toast('✓ Étape 1/2 OK — ' + fr.total_articles + ' articles trouvés' + (fr.fetched_full ? ' ('+fr.fetched_full+' avec contenu complet)' : ''), 3000);
+
+    // ── ÉTAPE 2 : ANALYZE ──
+    currentStep = 'analyze';
+    RSS.startTime = Date.now();  // reset chrono pour l'étape 2
+
+    var ar = await rssFetchWithAbort('/api/rss/analyze', {
+      feeds: fr.feeds,
+      question: question,
+      system_prompt: sysPrompt,
+      mode: mode,
+    });
+
+    if(ar.error){
+      rssEndAnalysis();
+      toast('⚠ Synthèse IA : '+ar.error.substring(0,100), 5500);
+      return;
+    }
+
+    RSS.syntheses = ar;
+    rssEndAnalysis();
+    rssRenderResult();
+
+  } catch(e){
+    rssEndAnalysis();
+    if(e.name === 'AbortError'){
+      toast('⏹ Analyse annulée par l\'utilisateur', 3000);
+    } else {
+      toast('⚠ Erreur réseau : '+(e.message || e.name).substring(0,100), 5000);
+      console.error('[RSS] Erreur:', e);
+    }
+  }
+}
+
+// Helper : fetch avec signal d'abort + parse JSON
+async function rssFetchWithAbort(url, data){
+  var resp = await fetch(url, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(data),
+    signal: RSS.abortCtrl.signal,
+  });
+  // Même si HTTP non-OK, on essaie de lire le JSON (le serveur renvoie {"error":...})
+  try { return await resp.json(); }
+  catch(e){ return {error: 'Réponse serveur invalide (HTTP '+resp.status+')'}; }
+}
+
+function rssCancelAnalysis(){
+  if(!RSS.abortCtrl) return;
+  rssAbortRunning();
+  rssEndAnalysis();
+  toast('⏹ Annulation en cours…', 2000);
+}
+
+function rssEndAnalysis(){
+  if(RSS.timerId){ clearInterval(RSS.timerId); RSS.timerId = null; }
+  RSS.abortCtrl = null;
+  $('rss-progress').style.display = 'none';
+  $('rss-run-btn').textContent = '🚀 Analyser';
+  $('rss-run-btn').onclick = function(){ rssRunAnalysis(); };
+}
+
+function rssRenderResult(){
+  if(!RSS.syntheses) return;
+  $('rss-result-block').style.display = 'block';
+  var meta = '';
+  if(RSS.syntheses.mode === 'together'){
+    var s = RSS.syntheses.stats || {};
+    meta = ' · '+s.feeds+' flux · '+s.articles+' articles · '+(s.with_full_content||0)+' avec contenu complet';
+    if(RSS.question) meta += ' · question ciblée';
+    $('rss-result-content').textContent = RSS.syntheses.synthesis || '(pas de synthèse)';
+  } else {
+    // per_feed : concaténer les synthèses
+    var parts = (RSS.syntheses.syntheses || []).map(function(s){
+      var head = '## 📡 ' + s.feed_name + '\n*' + s.feed_url + '* · ' + s.article_count + ' articles\n\n';
+      if(s.error){
+        return head + '⚠ Erreur : ' + s.error;
+      }
+      return head + (s.synthesis || '(pas de synthèse)');
+    });
+    meta = ' · '+(RSS.syntheses.syntheses||[]).length+' flux analysés séparément';
+    if(RSS.question) meta += ' · question ciblée';
+    $('rss-result-content').textContent = parts.join('\n\n---\n\n');
+  }
+  $('rss-result-meta').textContent = meta;
+  $('rss-save-btn').style.display = 'inline-flex';
+}
+
+async function rssSaveAsFile(){
+  if(!RSS.syntheses){ toast('Pas de synthèse à sauver'); return; }
+
+  // Nom basé sur la question si fournie
+  var slugBase = RSS.question
+    ? RSS.question.substring(0,40).replace(/[^\w\sàâäéèêëïîôöùûüç-]/gi,'').replace(/\s+/g,'-').toLowerCase()
+    : 'veille';
+  var dateStr = new Date().toISOString().substring(0,10);
+  var base = safeFileName('rss-analyse-' + slugBase + '-' + dateStr);
+
   var newPath = null;
   for(var i=1; i<30; i++){
     var tryName = i===1 ? base : base+'-'+i;
@@ -215,31 +339,52 @@ async function saveDDGAsFile(){
   }
   if(!newPath){ toast('⚠ Création impossible'); return; }
 
-  var head = '# 🦆 Recherche web — ' + DDG.fname + '\n\n';
-  head += '*Source :* [['+DDG.fname+']]  \n';
-  head += '*Requête utilisée :* `' + DDG.query + '`  \n';
-  if(DDG.question) head += '*Question :* ' + DDG.question + '  \n';
-  if(DDG.sysPrompt) head += '*Prompt système :* `' + DDG.sysPrompt.substring(0,200) + '`  \n';
-  head += '*Résultats analysés :* ' + DDG.results.length;
-  var fetched = DDG.results.filter(function(r){return r.fetch_status==='ok';}).length;
-  if(fetched > 0) head += ' (dont ' + fetched + ' avec contenu complet)';
-  head += '\n\n---\n\n';
-  var resList = DDG.results.map(function(r,i){
-    return '['+(i+1)+'] **'+r.title+'** — '+r.url;
-  }).join('\n');
-  var content = head + DDG.synthesis + '\n\n---\n\n## Liste brute des résultats\n\n' + resList + '\n';
+  // Construire le contenu
+  var head = '# 🗞 Veille RSS — ' + dateStr + '\n\n';
+  if(RSS.question)  head += '*Question :* ' + RSS.question + '  \n';
+  if(RSS.sysPrompt) head += '*Prompt système :* `' + RSS.sysPrompt.substring(0,200) + '`  \n';
+  head += '*Mode :* ' + (RSS.mode === 'together' ? 'Tous flux ensemble' : 'Flux par flux') + '  \n';
+  if(RSS.fetchedFeeds){
+    var total = RSS.fetchedFeeds.reduce(function(a,f){return a+(f.items||[]).length;}, 0);
+    var fetched = RSS.fetchedFeeds.reduce(function(a,f){return a+(f.items||[]).filter(function(it){return it.fetch_status==='ok';}).length;}, 0);
+    head += '*Articles analysés :* ' + total;
+    if(fetched > 0) head += ' (dont ' + fetched + ' avec contenu complet)';
+    head += '  \n';
+  }
+  head += '\n---\n\n';
+
+  // Corps : la synthèse
+  var body = '';
+  if(RSS.syntheses.mode === 'together'){
+    body = RSS.syntheses.synthesis || '';
+  } else {
+    body = (RSS.syntheses.syntheses || []).map(function(s){
+      var h = '## 📡 ' + s.feed_name + '\n*[' + s.feed_url + '](' + s.feed_url + ')* · ' + s.article_count + ' articles\n\n';
+      if(s.error) return h + '⚠ Erreur : ' + s.error;
+      return h + (s.synthesis || '');
+    }).join('\n\n---\n\n');
+  }
+
+  // Liste brute des articles à la fin
+  var rawList = '';
+  if(RSS.fetchedFeeds && RSS.fetchedFeeds.length){
+    rawList = '\n\n---\n\n## Liste brute des articles\n\n';
+    var counter = 1;
+    RSS.fetchedFeeds.forEach(function(f){
+      if(!f.items || !f.items.length) return;
+      rawList += '### ' + f.name + '\n\n';
+      f.items.forEach(function(it){
+        var dateS = it.date_str || '?';
+        rawList += '['+(counter++)+'] **' + (it.title||'(sans titre)') + '** — *' + dateS + '*\n' + (it.link||'') + '\n\n';
+      });
+    });
+  }
+
+  var content = head + body + rawList;
 
   await post('/api/files/save', {path: newPath, content: content});
   openFileTab(newPath, content);
   loadDir(CUR_DIR);
-  closeDuckDuckGo();
-  toast('✓ Synthèse sauvegardée');
+  closeRSS();
+  toast('✓ Analyse RSS sauvegardée');
 }
-
-// Handlers Escape + clic-extérieur
-document.addEventListener('click', function(e){
-  if(e.target === document.getElementById('mddg')) closeDuckDuckGo();
-});
-document.addEventListener('keydown', function(e){
-  if(e.key === 'Escape' && document.getElementById('mddg') && document.getElementById('mddg').classList.contains('on')) closeDuckDuckGo();
-});
