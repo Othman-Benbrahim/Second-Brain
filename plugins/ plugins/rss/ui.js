@@ -178,6 +178,7 @@ async function rssRunAnalysis(){
   var hours      = parseInt($('rss-hours').value);
   var maxItems   = parseInt($('rss-max-items').value);
   var fetchFull  = $('rss-fetch-full').checked;
+  var enableSig  = $('rss-signals') ? $('rss-signals').checked : true;
   var modeEl     = document.querySelector('input[name="rss-mode"]:checked');
   var mode       = modeEl ? modeEl.value : 'together';
   var question   = $('rss-question').value.trim();
@@ -194,6 +195,7 @@ async function rssRunAnalysis(){
   $('rss-run-btn').onclick = function(){ rssCancelAnalysis(); };
   $('rss-progress').style.display = 'block';
   $('rss-result-block').style.display = 'none';
+  if($('rss-signals-block')) $('rss-signals-block').style.display = 'none';
   $('rss-save-btn').style.display = 'none';
 
   // Démarrer le chronomètre (mise à jour toutes les 1 s)
@@ -243,6 +245,7 @@ async function rssRunAnalysis(){
       question: question,
       system_prompt: sysPrompt,
       mode: mode,
+      enable_signals: enableSig,
     });
 
     if(ar.error){
@@ -294,8 +297,58 @@ function rssEndAnalysis(){
   $('rss-run-btn').onclick = function(){ rssRunAnalysis(); };
 }
 
+function rssRenderSignals(signals){
+  if(!signals || !signals.top_terms || !signals.top_terms.length){
+    $('rss-signals-block').style.display = 'none';
+    return;
+  }
+  var html = '';
+  html += '<div style="color:var(--tx2);font-size:10.5px;margin-bottom:8px">Analyse sur '
+       + signals.article_count + ' articles, ' + signals.total_words + ' mots significatifs.</div>';
+
+  // Termes émergents (le plus important)
+  if(signals.emerging_terms && signals.emerging_terms.length){
+    html += '<div style="margin-bottom:8px"><strong style="color:var(--acc)">⚡ Termes émergents</strong> '
+         + '<span style="color:var(--tx2);font-size:10px">(vs run précédent)</span><br>';
+    html += signals.emerging_terms.map(function(e){
+      if(e.status === 'nouveau'){
+        return '<span style="color:var(--grn)">'+esc(e.term)+'</span> <em style="color:var(--tx2);font-size:10px">NOUVEAU ('+e.current+')</em>';
+      } else {
+        var ratio = (e.current / Math.max(e.previous, 1)).toFixed(1);
+        return '<span style="color:var(--acc)">'+esc(e.term)+'</span> <em style="color:var(--tx2);font-size:10px">'+e.previous+'→'+e.current+' (×'+ratio+')</em>';
+      }
+    }).join(' · ');
+    html += '</div>';
+  } else {
+    html += '<div style="margin-bottom:8px;color:var(--tx2);font-style:italic">Aucune émergence détectée (premier run ou pas de variation significative).</div>';
+  }
+
+  // Top termes
+  if(signals.top_terms && signals.top_terms.length){
+    html += '<div style="margin-bottom:8px"><strong>📊 Top termes</strong> ';
+    html += signals.top_terms.map(function(t){
+      return esc(t[0])+' ('+t[1]+')';
+    }).join(' · ');
+    html += '</div>';
+  }
+
+  // Bigrammes
+  if(signals.top_bigrams && signals.top_bigrams.length){
+    html += '<div><strong>🔗 Bigrammes</strong> ';
+    html += signals.top_bigrams.map(function(b){
+      return '<code style="background:var(--bg4);padding:1px 5px;border-radius:3px">'+esc(b[0])+'</code> ('+b[1]+')';
+    }).join(' · ');
+    html += '</div>';
+  }
+
+  $('rss-signals-content').innerHTML = html;
+  $('rss-signals-block').style.display = 'block';
+}
+
 function rssRenderResult(){
   if(!RSS.syntheses) return;
+  // Afficher signaux EN PREMIER
+  if(RSS.syntheses.signals) rssRenderSignals(RSS.syntheses.signals);
   $('rss-result-block').style.display = 'block';
   var meta = '';
   if(RSS.syntheses.mode === 'together'){
@@ -304,12 +357,9 @@ function rssRenderResult(){
     if(RSS.question) meta += ' · question ciblée';
     $('rss-result-content').textContent = RSS.syntheses.synthesis || '(pas de synthèse)';
   } else {
-    // per_feed : concaténer les synthèses
     var parts = (RSS.syntheses.syntheses || []).map(function(s){
       var head = '## 📡 ' + s.feed_name + '\n*' + s.feed_url + '* · ' + s.article_count + ' articles\n\n';
-      if(s.error){
-        return head + '⚠ Erreur : ' + s.error;
-      }
+      if(s.error){ return head + '⚠ Erreur : ' + s.error; }
       return head + (s.synthesis || '(pas de synthèse)');
     });
     meta = ' · '+(RSS.syntheses.syntheses||[]).length+' flux analysés séparément';
@@ -353,13 +403,46 @@ async function rssSaveAsFile(){
   }
   head += '\n---\n\n';
 
-  // Corps : la synthèse
-  var body = '';
+  // Section signaux faibles AVANT la synthèse IA
+  var signalsMd = '';
+  var sig = RSS.syntheses.signals;
+  if(sig && sig.top_terms && sig.top_terms.length){
+    signalsMd = '## 🔬 Signaux faibles détectés localement\n\n';
+    signalsMd += '*Analyse lexicale sur ' + sig.article_count + ' articles, ' + sig.total_words + ' mots significatifs.*\n\n';
+
+    if(sig.emerging_terms && sig.emerging_terms.length){
+      signalsMd += '### ⚡ Termes émergents\n*Comparaison avec le run précédent.*\n\n';
+      sig.emerging_terms.forEach(function(e){
+        if(e.status === 'nouveau'){
+          signalsMd += '- **`' + e.term + '`** : NOUVEAU (' + e.current + ' occurrences)\n';
+        } else {
+          var r = (e.current / Math.max(e.previous, 1)).toFixed(1);
+          signalsMd += '- **`' + e.term + '`** : ' + e.previous + ' → ' + e.current + ' occurrences (×' + r + ')\n';
+        }
+      });
+      signalsMd += '\n';
+    } else {
+      signalsMd += '### ⚡ Termes émergents\n*Aucune émergence significative détectée (ou premier run sur ces flux).*\n\n';
+    }
+    signalsMd += '### 📊 Termes les plus fréquents\n';
+    signalsMd += sig.top_terms.map(function(t){return '`'+t[0]+'` ('+t[1]+')';}).join(', ');
+    signalsMd += '\n\n';
+
+    if(sig.top_bigrams && sig.top_bigrams.length){
+      signalsMd += '### 🔗 Associations récurrentes\n';
+      signalsMd += sig.top_bigrams.map(function(b){return '`'+b[0]+'` ('+b[1]+')';}).join(', ');
+      signalsMd += '\n\n';
+    }
+    signalsMd += '---\n\n';
+  }
+
+  // Corps : la synthèse IA
+  var body = '## 🧠 Interprétation IA\n\n';
   if(RSS.syntheses.mode === 'together'){
-    body = RSS.syntheses.synthesis || '';
+    body += RSS.syntheses.synthesis || '';
   } else {
-    body = (RSS.syntheses.syntheses || []).map(function(s){
-      var h = '## 📡 ' + s.feed_name + '\n*[' + s.feed_url + '](' + s.feed_url + ')* · ' + s.article_count + ' articles\n\n';
+    body += (RSS.syntheses.syntheses || []).map(function(s){
+      var h = '### 📡 ' + s.feed_name + '\n*[' + s.feed_url + '](' + s.feed_url + ')* · ' + s.article_count + ' articles\n\n';
       if(s.error) return h + '⚠ Erreur : ' + s.error;
       return h + (s.synthesis || '');
     }).join('\n\n---\n\n');
@@ -380,7 +463,7 @@ async function rssSaveAsFile(){
     });
   }
 
-  var content = head + body + rawList;
+  var content = head + signalsMd + body + rawList;
 
   await post('/api/files/save', {path: newPath, content: content});
   openFileTab(newPath, content);

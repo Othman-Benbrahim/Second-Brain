@@ -80,6 +80,10 @@
           <input type="checkbox" id="rss-fetch-full" checked style="accent-color:var(--acc)">
           📖 Fetch contenu complet (qualité ++)
         </label>
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:11.5px;color:var(--tx);margin:0" title="Analyse lexicale locale (fréquences, bigrammes, émergences) injectée dans le prompt IA pour ancrer la synthèse sur des données objectives">
+          <input type="checkbox" id="rss-signals" checked style="accent-color:var(--acc)">
+          🔬 Signaux faibles (analyse locale)
+        </label>
         <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:11.5px;color:var(--tx);margin:0">
           <input type="radio" name="rss-mode" value="together" checked style="accent-color:var(--acc)">
           🌐 Tous les flux ensemble
@@ -105,6 +109,13 @@
 
     <div id="rss-progress" style="display:none">
       <div class="arx-block-title" id="rss-progress-step">⏳ Fetch des flux en cours…</div>
+    </div>
+
+    <div id="rss-signals-block" style="display:none">
+      <div class="arx-block">
+        <div class="arx-block-title">🔬 Signaux faibles (analyse locale)</div>
+        <div id="rss-signals-content" style="background:var(--bg3);border:1px solid var(--bdr);border-radius:var(--r);padding:12px;font-size:11.5px;line-height:1.6;color:var(--tx3);font-family:var(--mono)"></div>
+      </div>
     </div>
 
     <div id="rss-result-block" style="display:none">

@@ -20,6 +20,12 @@ import requests as http
 
 from second_brain import _ai_call
 
+# Chargement dynamique de signal_engine (le loader principal ne gère pas les imports relatifs)
+import importlib.util as _ilu
+_se_spec = _ilu.spec_from_file_location("rss_signal_engine", Path(__file__).parent / "signal_engine.py")
+signal_engine = _ilu.module_from_spec(_se_spec)
+_se_spec.loader.exec_module(signal_engine)
+
 # ── Configuration ─────────────────────────────────────────────
 VAULT_RSS_FILE   = "flux-rss.md"
 FETCH_TIMEOUT    = (10, 20)
@@ -648,10 +654,11 @@ def register(app, rd_cfg):
             return jsonify({"error": "Clé API manquante"}), 400
 
         d = request.json or {}
-        feeds_data = d.get('feeds') or []
-        question   = (d.get('question') or '').strip()
-        user_sys   = (d.get('system_prompt') or '').strip()
-        mode       = (d.get('mode') or 'together').strip()  # 'together' | 'per_feed'
+        feeds_data        = d.get('feeds') or []
+        question          = (d.get('question') or '').strip()
+        user_sys          = (d.get('system_prompt') or '').strip()
+        mode              = (d.get('mode') or 'together').strip()  # 'together' | 'per_feed'
+        enable_signals    = bool(d.get('enable_signals', True))    # nouveau toggle
 
         if not feeds_data:
             return jsonify({"error": "Aucun article à analyser"}), 400
@@ -699,31 +706,66 @@ def register(app, rd_cfg):
             if not all_items:
                 return jsonify({"error": "Aucun article dans les flux fournis"}), 400
 
+            # ── ANALYSE LOCALE DES SIGNAUX FAIBLES (avant l'IA) ──
+            signals = None
+            signals_block_prompt = ""
+            if enable_signals:
+                feed_urls_set = [f.get('url') for f in feeds_data if f.get('url')]
+                prev_run = signal_engine.load_previous_run(feed_urls_set)
+                signals = signal_engine.analyze_weak_signals(all_items, previous_run=prev_run)
+                signal_engine.save_run(signals, feed_urls_set)
+                signals_block_prompt = signal_engine.format_for_prompt(signals)
+                print(f"[RSS-signals] {len(signals.get('top_terms', []))} top termes, "
+                      f"{len(signals.get('top_bigrams', []))} bigrammes, "
+                      f"{len(signals.get('emerging_terms', []))} émergents")
+
             articles_md = _articles_md(all_items)
             prompt_chars = len(articles_md)
             print(f"[RSS] Analyse 'together' : {len(all_items)} articles, ~{prompt_chars} chars dans le prompt")
 
+            # Construction du prompt avec les signaux en préambule
+            signals_intro = ""
+            signals_guidance = ""
+            if signals and signals.get('top_terms'):
+                signals_intro = (
+                    f"=== INDICES OBJECTIFS (analyse lexicale locale du corpus) ===\n"
+                    f"{signals_block_prompt}\n"
+                    f"=== FIN INDICES ===\n\n"
+                )
+                signals_guidance = (
+                    "\n\nLes INDICES OBJECTIFS ci-dessus sont calculés par analyse lexicale locale "
+                    "(fréquences, bigrammes, comparaison avec le run précédent). Utilise-les pour :\n"
+                    "- ancrer ta synthèse sur des données quantifiées plutôt que ton intuition\n"
+                    "- repérer les signaux faibles candidats (termes émergents, associations récurrentes)\n"
+                    "- contredire ces indices si l'analyse qualitative montre qu'ils sont trompeurs "
+                    "(un mot fréquent peut être du bruit, un émergent peut être un artefact d'un seul article).\n"
+                )
+
             if question:
                 user_prompt = (
+                    f"{signals_intro}"
                     f"=== OBJECTIF / QUESTION DE L'UTILISATEUR ===\n{question}\n=== FIN ===\n\n"
                     f"Tu vas analyser {len(all_items)} articles issus de {len(feeds_data)} flux RSS. "
                     f"Réponds **précisément** à l'objectif/question ci-dessus. Adapte ta structure à ce qui est demandé. "
                     f"Cite chaque article qui contribue par son numéro [1], [2], etc. "
-                    f"Si une source est incomplète, signale-le. Si aucune ne permet de répondre, dis-le explicitement.\n\n"
+                    f"Si une source est incomplète, signale-le. Si aucune ne permet de répondre, dis-le explicitement."
+                    f"{signals_guidance}\n"
                     f"=== ARTICLES ===\n{articles_md}\n=== FIN ===\n\n"
                     f"Termine par une section **## Sources** listant tous les liens cités."
                 )
             else:
                 user_prompt = (
+                    f"{signals_intro}"
                     f"Voici {len(all_items)} articles issus de {len(feeds_data)} flux RSS.\n\n"
                     f"Produis une synthèse en français (Markdown structuré) qui :\n"
-                    f"1. Identifie les **thèmes majeurs** qui ressortent du corpus\n"
+                    f"1. Identifie les **thèmes majeurs** qui ressortent du corpus (appuyés sur les indices objectifs)\n"
                     f"2. Souligne **convergences et contradictions** entre les sources\n"
-                    f"3. Repère les **signaux faibles** ou angles morts\n"
+                    f"3. Interprète les **termes émergents** s'il y en a — donnent-ils un signal réel ou un artefact ?\n"
                     f"4. Évalue la **qualité épistémique** (sources primaires/secondaires, opinions/faits)\n"
                     f"5. Propose 2-3 **angles à creuser** ensuite\n\n"
                     f"Cite chaque source avec son numéro [1], [2], etc.\n"
-                    f"Termine par une section **## Sources** listant tous les liens cités.\n\n"
+                    f"Termine par une section **## Sources** listant tous les liens cités."
+                    f"{signals_guidance}\n"
                     f"=== ARTICLES ===\n{articles_md}\n=== FIN ==="
                 )
 
@@ -739,6 +781,7 @@ def register(app, rd_cfg):
             return jsonify({
                 "mode": "together",
                 "synthesis": synthesis,
+                "signals": signal_engine.signals_to_client(signals) if signals else None,
                 "stats": {
                     "feeds": len(feeds_data),
                     "articles": len(all_items),
@@ -747,6 +790,22 @@ def register(app, rd_cfg):
             })
 
         # ── MODE 2 : flux par flux ──
+        # On calcule des signaux GLOBAUX (tous flux confondus) une fois,
+        # qu'on injecte en contexte dans chaque appel IA par flux.
+        global_signals = None
+        global_signals_block = ""
+        if enable_signals:
+            all_items_global = []
+            for f in feeds_data:
+                all_items_global.extend(f.get('items', []))
+            if all_items_global:
+                feed_urls_set = [f.get('url') for f in feeds_data if f.get('url')]
+                prev_run = signal_engine.load_previous_run(feed_urls_set)
+                global_signals = signal_engine.analyze_weak_signals(all_items_global, previous_run=prev_run)
+                signal_engine.save_run(global_signals, feed_urls_set)
+                global_signals_block = signal_engine.format_for_prompt(global_signals)
+                print(f"[RSS-signals/per_feed] indices globaux calculés sur {len(all_items_global)} articles")
+
         syntheses = []
         for f in feeds_data:
             items = f.get('items', [])
@@ -762,18 +821,32 @@ def register(app, rd_cfg):
 
             articles_md = _articles_md(items, max_per=1200)
 
+            # Préambule signaux globaux (en contexte)
+            signals_intro_pf = ""
+            if global_signals_block:
+                signals_intro_pf = (
+                    f"=== INDICES OBJECTIFS GLOBAUX (tous flux confondus, contexte) ===\n"
+                    f"{global_signals_block}\n"
+                    f"=== FIN INDICES ===\n\n"
+                )
+
             if question:
                 up = (
+                    f"{signals_intro_pf}"
                     f"=== OBJECTIF / QUESTION ===\n{question}\n=== FIN ===\n\n"
                     f"Analyse spécifiquement les articles du flux **{f.get('name')}** ({len(items)} articles). "
-                    f"Réponds précisément à l'objectif. Cite chaque article par son numéro [1], [2].\n\n"
+                    f"Réponds précisément à l'objectif. Cite chaque article par son numéro [1], [2]. "
+                    f"Les indices globaux ci-dessus te donnent le contexte de l'actualité — note "
+                    f"si ce flux suit le mouvement général ou s'en écarte.\n\n"
                     f"=== ARTICLES ===\n{articles_md}\n=== FIN ==="
                 )
             else:
                 up = (
+                    f"{signals_intro_pf}"
                     f"Synthèse du flux **{f.get('name')}** ({len(items)} articles).\n"
                     f"Markdown structuré, français.\n"
-                    f"Identifie : thèmes majeurs, points-clés, signaux faibles, biais éventuels.\n"
+                    f"Identifie : thèmes majeurs, points-clés, signaux faibles, biais éventuels. "
+                    f"Compare avec les indices globaux : ce flux est-il aligné ou en décalage avec l'actualité générale ?\n"
                     f"Cite par [N].\n\n"
                     f"=== ARTICLES ===\n{articles_md}\n=== FIN ==="
                 )
@@ -795,4 +868,8 @@ def register(app, rd_cfg):
                 'with_full_content': sum(1 for it in items if it.get('full_content')),
             })
 
-        return jsonify({"mode": "per_feed", "syntheses": syntheses})
+        return jsonify({
+            "mode": "per_feed",
+            "syntheses": syntheses,
+            "signals": signal_engine.signals_to_client(global_signals) if global_signals else None,
+        })
