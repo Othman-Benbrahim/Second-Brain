@@ -1,2 +1,22 @@
+# Second Brain — dépendances Python
+#
+# Installation :  pip install -r requirements.txt
+#
+# Aucune autre dépendance n'est requise : tout le reste utilise la
+# bibliothèque standard Python (re, time, json, html, datetime, pathlib,
+# urllib, threading, concurrent.futures, xml.etree.ElementTree, etc.).
+
+# ── Cœur (obligatoire) ─────────────────────────────────────────────
 flask>=3.0.0
 requests>=2.31.0
+
+# ── Optionnel : plugin DuckDuckGo ──────────────────────────────────
+# Première stratégie du plugin DDG (la plus fiable). Sans cette
+# dépendance, le plugin retombe sur le scraping de `lite.duckduckgo.com`
+# puis sur les instances SearXNG publiques — ce qui fonctionne mais avec
+# un taux de blocage plus élevé. Recommandé pour un usage régulier.
+#
+#   pip install ddgs
+#
+# ddgs>=9.0.0
+
