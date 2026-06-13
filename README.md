@@ -61,6 +61,8 @@ secondbrain/
 ├── second_brain.py       # Cœur Flask : routes + plugin loader
 ├── ui.html               # UI principale (HTML/CSS/JS en un seul fichier)
 ├── requirements.txt      # flask, requests
+├── .env.example          # Modèle de secrets (à copier en .env, jamais commité)
+├── .gitignore            # Ignore .env, __pycache__, données locales
 ├── plugins/              # Plugins auto-découverts au démarrage
 │   ├── README.md         # Convention de développement (résumé)
 │   ├── arxiv/
@@ -88,6 +90,19 @@ Tous les paramètres sont accessibles via **⚙ Paramètres** (icône engrenage 
 
 **Compatibilité API** : tout endpoint compatible OpenAI (OpenRouter, Anthropic direct, Mistral, Together, OpenAI, vLLM local, etc.).
 
+### 🔐 Secrets des plugins (`.env`)
+
+Les plugins qui appellent des services externes (Shodan, VirusTotal, etc.) lisent leurs clés depuis un fichier **`.env`**, chargé automatiquement au démarrage dans l'environnement. Copiez le modèle fourni, puis renseignez vos clés :
+
+```bash
+cp .env.example .env
+```
+
+- `.env` à la racine → clés partagées entre plusieurs plugins
+- `plugins/<nom>/.env` → clés propres à un plugin (optionnel)
+
+Le `.env` réel **n'est jamais commité** (il figure dans `.gitignore`) — seul `.env.example`, sans valeurs, est versionné. La configuration de l'IA (clé, modèle, vault) reste, elle, dans **⚙ Paramètres** / `~/.secondbrain/config.json`.
+
 ---
 
 ## ⌨ Raccourcis clavier
@@ -105,6 +120,7 @@ Tous les paramètres sont accessibles via **⚙ Paramètres** (icône engrenage 
 
 - **100 % local** : aucune télémétrie, aucune connexion sortante sauf vers l'API IA que vous avez configurée
 - **Pas de base de données** : tout vit dans votre vault `.md` + `~/.secondbrain/` (config + presets de prompts)
+- **Secrets hors du dépôt** : vos clés API vivent dans un `.env` local, ignoré par git — elles ne partent jamais sur GitHub
 - **Vos fichiers ne quittent pas votre machine** sauf quand vous invoquez l'IA (et même alors, seul le contenu nécessaire est envoyé)
 
 ---

@@ -40,7 +40,8 @@ plugins/mon-plugin/
 ├── __init__.py      # Optionnel — code Python (routes Flask)
 ├── ui.html          # Optionnel — HTML injecté (modals, panneaux)
 ├── ui.css           # Optionnel — CSS injecté
-└── ui.js            # Optionnel — JS injecté
+├── ui.js            # Optionnel — JS injecté
+└── .env             # Optionnel — secrets propres au plugin (jamais commité)
 ```
 
 **Seul `manifest.json` est strictement obligatoire.** Un plugin peut être :
@@ -76,6 +77,7 @@ plugins/mon-plugin/
 | `description` | Vue par les utilisateurs dans la doc |
 | `author` | Crédits |
 | `buttons` | Liste des boutons à ajouter dans la toolbar |
+| `env` | (Optionnel) Variables d'environnement attendues — un avertissement s'affiche au démarrage si l'une manque |
 
 Pour chaque bouton :
 - `panel` : actuellement seul `toolbar` est supporté
@@ -248,6 +250,46 @@ if err:
     return jsonify({"error": err}), 500
 return jsonify({"reply": response})
 ```
+
+---
+
+## 🔐 Secrets et variables d'environnement (`.env`)
+
+Pour les clés API et autres secrets dont votre plugin a besoin (Shodan, VirusTotal, etc.), **n'écrivez jamais la valeur en dur** dans le code. Au démarrage, le cœur charge automatiquement des fichiers `.env` dans `os.environ`, à deux niveaux :
+
+- `.env` à la **racine du projet** — clés partagées entre plusieurs plugins
+- `plugins/<votre-plugin>/.env` — clés **propres** à votre plugin (optionnel)
+
+Dans votre `__init__.py`, lisez-les avec `os.getenv` :
+
+```python
+import os
+from flask import request, jsonify
+
+def register(app, rd_cfg):
+    @app.route("/api/monplugin/lookup", methods=["POST"])
+    def lookup():
+        key = os.getenv("SHODAN_API_KEY")
+        if not key:
+            return jsonify({"error": "SHODAN_API_KEY absente du .env"}), 400
+        # ... appel à l'API externe avec key
+        return jsonify({"result": "..."})
+```
+
+**Tout est fusionné dans un seul `os.environ`** : préfixez vos clés par le nom du plugin (`OSINT_SHODAN_KEY` plutôt que `KEY`) pour éviter les collisions entre plugins. Par défaut, une clé déjà définie à la racine n'est pas écrasée par un `.env` de plugin.
+
+Pour que le démarrage vous prévienne quand une clé manque, déclarez-les dans votre `manifest.json` :
+
+```json
+{
+  "name": "Mon Plugin",
+  "env": ["SHODAN_API_KEY", "VT_API_KEY"]
+}
+```
+
+Chaque variable absente déclenche alors un avertissement `⚠ Plugin '...' : variable manquante : ...` au lancement.
+
+> ⚠ **Le `.env` réel ne se commite jamais** (il est dans `.gitignore`). Versionnez à la place un `.env.example` listant les noms de clés avec des valeurs vides.
 
 ---
 
