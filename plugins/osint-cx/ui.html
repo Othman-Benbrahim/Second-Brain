@@ -1,1 +1,77 @@
+<div id="moscx" class="ov"><div class="mb mb-wide" style="width:820px;max-height:92vh">
+  <div style="display:flex;align-items:center;gap:10px">
+    <div class="mt" style="flex:1">🔍 OSINT Cross-Reference</div>
+    <button class="hbtn" onclick="closeOsintCx()">✕</button>
+  </div>
+  <div class="minfo">Recherche multi-source : pseudonyme, email, téléphone, IP ou domaine. Le plugin utilise uniquement des sources publiques accessibles depuis votre machine.</div>
 
+  <div id="oscx-form" class="arx-block">
+    <div class="arx-block-title">🎯 Requête OSINT</div>
+    <div style="display:flex;gap:8px;align-items:center">
+      <input id="oscx-query" type="text" placeholder="Pseudonyme, email@exemple.com, +33612345678, 8.8.8.8, domaine.com"
+             style="flex:1;padding:9px 12px;font-size:13px;border:1px solid var(--bdr);border-radius:var(--r);background:var(--bg3);color:var(--tx)"
+             onkeydown="if(event.key==='Enter')runOsintCxSearch()">
+      <button class="btn bp" onclick="runOsintCxSearch()" style="width:auto;padding:9px 18px;white-space:nowrap">🚀 Rechercher</button>
+    </div>
+    <div class="oscx-type-row">
+      <span>Type :</span>
+      <button class="btn bs oscx-type-btn on" data-type="auto" onclick="setOsintCxType('auto')">🔍 Auto</button>
+      <button class="btn bs oscx-type-btn" data-type="username" onclick="setOsintCxType('username')">👤 Pseudonyme</button>
+      <button class="btn bs oscx-type-btn" data-type="email" onclick="setOsintCxType('email')">📧 Email</button>
+      <button class="btn bs oscx-type-btn" data-type="phone" onclick="setOsintCxType('phone')">📞 Téléphone</button>
+      <button class="btn bs oscx-type-btn" data-type="ip" onclick="setOsintCxType('ip')">🌐 IP</button>
+      <button class="btn bs oscx-type-btn" data-type="domain" onclick="setOsintCxType('domain')">🏛 Domaine</button>
+    </div>
+    <label class="oscx-toggle">
+      <input id="oscx-brixhub" type="checkbox" onchange="toggleBrixHubBox()">
+      <span>Inclure BrixHub API</span>
+      <em>POST <code>/api/v1/search</code>, JSON, header <code>X-API-Key</code></em>
+    </label>
+
+    <div id="oscx-brixhub-box" class="oscx-card" style="display:none;margin-top:10px">
+      <div class="oscx-card-title">🧩 Critères BrixHub documentés</div>
+      <div class="oscx-grid">
+        <div class="oscx-k">Nom</div><div class="oscx-v"><input id="oscx-bx-nom" class="oscx-mini-input" placeholder="nom_famille"></div>
+        <div class="oscx-k">Prénom</div><div class="oscx-v"><input id="oscx-bx-prenom" class="oscx-mini-input" placeholder="prenom"></div>
+        <div class="oscx-k">Ville</div><div class="oscx-v"><input id="oscx-bx-ville" class="oscx-mini-input" placeholder="ville"></div>
+        <div class="oscx-k">Email</div><div class="oscx-v"><input id="oscx-bx-email" class="oscx-mini-input" placeholder="email"></div>
+        <div class="oscx-k">Téléphone</div><div class="oscx-v"><input id="oscx-bx-tel" class="oscx-mini-input" placeholder="telephone"></div>
+        <div class="oscx-k">Utilisateur</div><div class="oscx-v"><input id="oscx-bx-user" class="oscx-mini-input" placeholder="nom_utilisateur"></div>
+        <div class="oscx-k">Flexible</div><div class="oscx-v"><label><input id="oscx-bx-flex" type="checkbox"> recherche approximative</label></div>
+      </div>
+      <div class="oscx-note">Optionnel : colle ici un JSON complet BrixHub. Il sera envoyé tel quel après filtrage des champs documentés.</div>
+      <textarea id="oscx-bx-json" placeholder='{"nom_famille":"Dupont","prenom":"Jean","ville":"Paris","flexible":true}' style="width:100%;min-height:74px;margin-top:6px;padding:8px;border:1px solid var(--bdr);border-radius:var(--r);background:var(--bg3);color:var(--tx);font-family:var(--mono);font-size:12px"></textarea>
+    </div>
+    <div class="oscx-note">⚖️ À utiliser uniquement pour des recherches autorisées. Le plugin n'appelle plus d'autres endpoints BrixHub que celui fourni : <code>POST /api/v1/search</code>.</div>
+  </div>
+
+  <div id="oscx-progress" style="display:none">
+    <div class="arx-step">⏳ Recherche en cours — interrogation des sources publiques…</div>
+  </div>
+
+  <div id="oscx-error" style="display:none">
+    <div style="background:rgba(248,113,113,.08);border:1px solid rgba(248,113,113,.35);border-radius:var(--r);padding:12px 14px;font-size:12px;color:var(--red);line-height:1.55">
+      <div style="font-weight:600;margin-bottom:6px">⚠ Erreur</div>
+      <div id="oscx-error-msg" style="font-family:var(--mono);font-size:11px;color:var(--tx3);white-space:pre-wrap;word-break:break-word;background:var(--bg3);padding:8px 10px;border-radius:6px;margin-top:6px;max-height:160px;overflow:auto"></div>
+      <div style="margin-top:9px;display:flex;gap:6px;flex-wrap:wrap">
+        <button class="btn bs" onclick="openOsintCx()" style="width:auto;padding:5px 10px;font-size:11px">↺ Réessayer</button>
+        <button class="btn bs" onclick="window.open('/api/osintcx/ping','_blank')" style="width:auto;padding:5px 10px;font-size:11px">🩺 Test OSINT</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="oscx-results" style="display:none">
+    <div class="arx-block">
+      <div class="arx-block-title">📌 Résumé</div>
+      <div id="oscx-summary" class="oscx-summary"></div>
+    </div>
+    <div class="arx-block">
+      <div class="arx-block-title">🔗 Résultats</div>
+      <div id="oscx-list"></div>
+    </div>
+    <div class="mf">
+      <button class="btn bs" onclick="closeOsintCx()" style="width:auto;padding:7px 16px">Fermer</button>
+      <button class="btn bp" onclick="saveOsintCxAsFile()" id="oscx-save-btn" style="width:auto;padding:7px 16px">💾 Sauver comme .md</button>
+    </div>
+  </div>
+</div></div>

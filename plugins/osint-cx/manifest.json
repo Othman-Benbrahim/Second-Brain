@@ -1,0 +1,14 @@
+{
+  "name": "OSINT Cross-Reference",
+  "version": "1.3",
+  "description": "Recherche OSINT multi-source compatible Second Brain : pseudonyme, email, téléphone, IP et domaine, avec intégration optionnelle BrixHub v1 via X-API-Key serveur.",
+  "author": "HackerAI / adaptation Second Brain",
+  "buttons": [
+    {
+      "panel": "toolbar",
+      "label": "🔍 OSINT",
+      "title": "OSINT Cross-Reference — Recherche multi-source",
+      "onclick": "openOsintCx()"
+    }
+  ]
+}
