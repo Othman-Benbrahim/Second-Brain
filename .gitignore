@@ -1,58 +1,10 @@
-# ─── Données personnelles (ne jamais committer) ───
-.secondbrain/
-config.json
-*.local.json
-
-# ─── Notes personnelles (si elles sont à côté du code) ───
-# Décommentez si vous gardez vos notes dans ce dossier
-# notes/
-# vault/
-
-# ─── Python ───
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-
-# ─── Environnements virtuels ───
+# ── Secrets — ne JAMAIS commiter ────────────────────────────
 .env
-.venv
-env/
-venv/
-ENV/
+plugins/*/.env
 
-# ─── IDE / Éditeurs ───
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-.project
-.pydevproject
+# ── Python ──────────────────────────────────────────────────
+__pycache__/
+*.pyc
 
-# ─── OS ───
-.DS_Store
-Thumbs.db
-desktop.ini
-$RECYCLE.BIN/
-*.lnk
-
-# ─── Logs ───
-*.log
-logs/
+# ── Config / données locales ────────────────────────────────
+.secondbrain/
