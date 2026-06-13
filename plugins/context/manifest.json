@@ -1,0 +1,14 @@
+{
+  "name": "Context Builder",
+  "version": "1.0",
+  "description": "Sélection multi-fichiers avec résolution récursive des [[liens]], pour interroger l'IA sur un corpus assemblé.",
+  "author": "Second Brain core",
+  "buttons": [
+    {
+      "panel": "toolbar",
+      "label": "🗂 Multi-sélection",
+      "title": "Sélectionner plusieurs fichiers et interroger l'IA avec le contexte assemblé",
+      "onclick": "openContextBuilder()"
+    }
+  ]
+}

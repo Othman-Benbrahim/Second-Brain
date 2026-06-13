@@ -1,1 +1,71 @@
+<div id="mctx" class="ov"><div class="mb mb-wide" style="width:900px;max-height:92vh">
+  <div style="display:flex;align-items:center;gap:10px">
+    <div class="mt" style="flex:1">🗂 Multi-sélection — contexte IA</div>
+    <button class="hbtn" onclick="closeContextBuilder()">✕</button>
+  </div>
+  <div class="minfo">Sélectionnez plusieurs fichiers, optionnellement avec résolution récursive des [[liens]], puis interrogez l'IA sur le corpus assemblé.</div>
 
+  <div class="ctx-layout">
+    <!-- Colonne gauche : liste des fichiers cochables -->
+    <div class="ctx-left">
+      <input id="ctx-search" placeholder="Filtrer les fichiers…" oninput="renderCtxFiles()">
+      <div class="ctx-tools">
+        <button class="hbtn" onclick="ctxSelectAll(true)" style="padding:3px 8px;font-size:10.5px">Tout</button>
+        <button class="hbtn" onclick="ctxSelectAll(false)" style="padding:3px 8px;font-size:10.5px">Aucun</button>
+        <button class="hbtn" onclick="ctxSelectCurrent()" style="padding:3px 8px;font-size:10.5px" title="Sélectionner le fichier ouvert">Ouvert</button>
+        <span id="ctx-count" class="muted">0 sélectionné</span>
+      </div>
+      <div id="ctx-files"></div>
+    </div>
+
+    <!-- Colonne droite : options + question + actions -->
+    <div class="ctx-right">
+      <div class="ctx-block">
+        <label>Mode de constitution du contexte</label>
+        <div class="ctx-radios">
+          <label><input type="radio" name="ctx-mode" value="manual" checked onchange="ctxModeChange()"> <span>Manuel — uniquement les fichiers cochés</span></label>
+          <label><input type="radio" name="ctx-mode" value="auto" onchange="ctxModeChange()"> <span>Auto — suit les [[liens]] récursivement</span></label>
+        </div>
+      </div>
+
+      <div class="ctx-block" id="ctx-depth-block" style="display:none">
+        <label>Profondeur (combien de niveaux de liens à suivre)</label>
+        <div style="display:flex;align-items:center;gap:10px">
+          <input type="range" id="ctx-depth" min="1" max="5" value="2" oninput="$('ctx-depth-val').textContent=this.value" style="flex:1">
+          <span id="ctx-depth-val" style="font-family:var(--mono);color:var(--acc);font-size:13px;min-width:18px;text-align:center">2</span>
+        </div>
+      </div>
+
+      <div class="ctx-block">
+        <label>Prompt système (optionnel)</label>
+        <textarea id="ctx-sys-prompt" placeholder="Ex: Tu es expert en analyse symbolique. Réponds dans le registre IRIS∞…" rows="2" style="font-family:var(--mono);font-size:11.5px"></textarea>
+      </div>
+
+      <div class="ctx-block">
+        <label>Question</label>
+        <textarea id="ctx-question" placeholder="Que voulez-vous savoir sur ce corpus ?" rows="4"></textarea>
+      </div>
+
+      <div class="ctx-stats">
+        <span><strong id="ctx-est-files">0</strong> fichier(s) · <strong id="ctx-est-chars">0</strong> chars · ≈ <strong id="ctx-est-tokens">0</strong> tokens</span>
+        <button class="btn bs" onclick="ctxPreview()" style="padding:5px 10px;font-size:11px;width:auto">👁 Aperçu corpus</button>
+      </div>
+
+      <div class="ctx-actions">
+        <button class="btn bs" onclick="closeContextBuilder()" style="padding:7px 14px;width:auto">Fermer</button>
+        <button class="btn bp" onclick="ctxAsk()" id="ctx-ask-btn" style="padding:7px 14px;width:auto">🚀 Envoyer à l'IA</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Zone réponse -->
+  <div id="ctx-response" style="display:none">
+    <div class="ctx-block-title">✨ Réponse de l'IA</div>
+    <div id="ctx-resp-meta" class="muted" style="font-size:10.5px;margin-bottom:6px"></div>
+    <div id="ctx-answer"></div>
+    <div class="ctx-actions" style="margin-top:10px">
+      <button class="btn bs" onclick="ctxResetResponse()" style="padding:7px 14px;width:auto">↺ Nouvelle question</button>
+      <button class="btn bp" onclick="ctxSaveAsFile()" style="padding:7px 14px;width:auto">💾 Sauver comme .md</button>
+    </div>
+  </div>
+</div></div>
