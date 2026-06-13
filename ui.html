@@ -247,6 +247,9 @@ input:focus,textarea:focus,select:focus{border-color:var(--acc)}
   box-shadow:0 4px 12px rgba(0,0,0,.4);z-index:10;max-width:220px}
 #graph-wrap{flex:1;position:relative;overflow:hidden}
 
+/* ── CSS des plugins injecté ici ── */
+/* PLUGIN_CSS */
+
 /* Synthesis modal */
 #msyn .mb{width:700px;max-height:82vh}
 #syn-content{background:var(--bg3);border:1px solid var(--bdr);border-radius:var(--r);
@@ -318,6 +321,7 @@ input:focus,textarea:focus,select:focus{border-color:var(--acc)}
       </div>
       <button class="hbtn" onclick="saveFile()">💾</button>
       <button class="hbtn" onclick="suggestLinks()" title="Suggérer des [[liens]]">🔗 Liens IA</button>
+      <!-- PLUGIN_TOOLBAR_BUTTONS -->
     </div>
     <div id="ed-area">
       <div class="es" id="no-file"><div class="ei">📝</div><div>Ouvrez ou créez un fichier <strong>.md</strong></div></div>
@@ -434,6 +438,8 @@ input:focus,textarea:focus,select:focus{border-color:var(--acc)}
     <div id="graph-tooltip"></div>
   </div>
 </div></div>
+
+<!-- PLUGIN_HTML -->
 
 <!-- ── Modal Synthèse ── -->
 <div id="msyn" class="ov"><div class="mb">
@@ -558,16 +564,24 @@ function setMode(m){
 function updatePreview(){
   if(typeof marked==='undefined') return;
   var raw=($('md-editor').value||'');
-  // Replace [[wikilinks]] before marked parses
-  var html=marked.parse(raw);
-  html=html.replace(/\[\[([^\]|]+?)(?:\|([^\]]*))?\]\]/g,function(m,lnk,alias){
+  // 1. [[wikilinks]] AVANT marked (sinon marked les confond)
+  raw=raw.replace(/\[\[([^\]|\n]+?)(?:\|([^\]\n]*))?\]\]/g,function(m,lnk,alias){
     var d=alias||lnk;
-    return '<span class="wl" onclick="openWikilink(\''+lnk.replace(/\\/g,'\\\\').replace(/'/g,"\\'")+'\')" title="Ouvrir [['+esc(lnk)+']]">[['+esc(d)+']]</span>';
+    var safe=lnk.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+    return '<span class="wl" onclick="openWikilink(\''+safe+'\')" title="Ouvrir [['+lnk+']]">[['+d+']]</span>';
+  });
+  var html=marked.parse(raw);
+  // 2. Intercepter les <a href="*.md"> générés par marked (liens Markdown standard)
+  html=html.replace(/<a href="([^"]+?\.md)"([^>]*)>([^<]*)<\/a>/g,function(m,href,attrs,label){
+    if(/^https?:\/\//i.test(href)) return m;  // garder les URLs externes intactes
+    var safe=href.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+    return '<span class="wl" onclick="openWikilink(\''+safe+'\')" title="Ouvrir '+href+'">'+(label||href)+'</span>';
   });
   $('md-preview').innerHTML=html;
 }
 async function openWikilink(name){
-  var d=await fetch('/api/files/find?name='+eu(name.toLowerCase())+'&dir='+eu(CUR_DIR)).then(function(r){return r.json();});
+  var fromParam = ACTIVE ? '&from='+eu(ACTIVE) : '';
+  var d=await fetch('/api/files/find?name='+eu(name)+'&dir='+eu(CUR_DIR)+fromParam).then(function(r){return r.json();});
   if(d.error){toast('⚠ Fichier introuvable : '+name);return;}
   openFileTab(d.path,d.content);
 }
@@ -1085,6 +1099,8 @@ function applyFileAI(mode){
   renderTabBar(); if(EDITOR_MODE!=='edit') updatePreview();
   updateMindmap(v,ACTIVE.split(/[/\\]/).pop()); toast('✓ Appliqué — Ctrl+S pour sauvegarder');
 }
+
+/* PLUGIN_JS */
 
 // ══════════════════════════════════════════════════
 //  MINDMAP D3 (structure fichier)
