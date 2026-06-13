@@ -1,0 +1,14 @@
+{
+  "name": "Prompts Manager",
+  "version": "1.0",
+  "description": "Gestionnaire de prompts système (presets) persistants. Auto-injection de sélecteurs dans les modals des autres plugins via l'attribut data-sys-prompt-target.",
+  "author": "Second Brain core",
+  "buttons": [
+    {
+      "panel": "toolbar",
+      "label": "📝 Prompts",
+      "title": "Gérer les prompts système (presets réutilisables)",
+      "onclick": "openPromptsManager()"
+    }
+  ]
+}

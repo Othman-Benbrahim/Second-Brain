@@ -1,1 +1,42 @@
+<div id="mprompts" class="ov"><div class="mb" style="width:740px;max-height:88vh">
+  <div style="display:flex;align-items:center;gap:10px">
+    <div class="mt" style="flex:1">📝 Gestionnaire de prompts système</div>
+    <button class="hbtn" onclick="closePromptsManager()">✕</button>
+  </div>
+  <div class="minfo">Créez des prompts système réutilisables. Ils apparaissent automatiquement comme sélecteur 📝 dans les modals des plugins qui utilisent l'IA.</div>
 
+  <div class="prompts-layout">
+    <!-- Colonne gauche : liste -->
+    <div class="prompts-list-col">
+      <button class="btn bp" onclick="newPrompt()" style="padding:7px;font-size:11px;width:100%">+ Nouveau preset</button>
+      <div id="prompts-list"></div>
+    </div>
+
+    <!-- Colonne droite : éditeur -->
+    <div class="prompts-edit-col">
+      <div id="prompts-empty" class="prompts-empty">
+        ← Sélectionnez un preset ou créez-en un nouveau
+      </div>
+      <div id="prompts-edit" style="display:none">
+        <div class="prompts-block">
+          <label>Nom du preset</label>
+          <input id="prompt-name" placeholder="Ex: Analyse symbolique IRIS∞">
+        </div>
+        <div class="prompts-block prompts-content-block">
+          <label>Contenu du prompt système</label>
+          <textarea id="prompt-content" placeholder="Tu es expert en…&#10;Tu réponds en français…&#10;Format Markdown structuré…"></textarea>
+        </div>
+        <div class="prompts-edit-actions">
+          <button class="btn bs" onclick="deletePromptUI()" id="prompt-del-btn" style="display:none;padding:6px 12px;color:var(--red);border-color:rgba(248,113,113,.3);width:auto">🗑 Supprimer</button>
+          <button class="btn bs" onclick="cancelEditPrompt()" style="padding:6px 12px;width:auto">Annuler</button>
+          <button class="btn bp" onclick="savePrompt()" style="padding:6px 12px;width:auto">💾 Sauver</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="prompts-footer">
+    <span>Stockage : <code>~/.secondbrain/system_prompts.json</code></span>
+    <button class="btn bs" onclick="resetPromptsToDefault()" style="padding:4px 10px;font-size:10.5px;width:auto">↻ Restaurer les défauts</button>
+  </div>
+</div></div>
