@@ -32,6 +32,13 @@ import ipaddress
 import re
 import socket
 import time
+import json
+import shutil
+import subprocess
+import tempfile
+import sys
+import sysconfig
+import importlib.util
 from threading import Lock
 from urllib.parse import urlparse, urljoin
 
@@ -39,7 +46,10 @@ from flask import request, jsonify
 import requests as http
 
 TIMEOUT = (7, 12)
-UA = "SecondBrain-OSINT-CX/1.4 (+local plugin)"
+UA = "SecondBrain-OSINT-CX/1.8 (+local plugin)"
+GITHUB_API_URL = "https://api.github.com/users"
+WIKIDATA_API_URL = "https://www.wikidata.org/w/api.php"
+ENTREPRISE_API_URL = "https://recherche-entreprises.api.gouv.fr/search"
 
 # BrixHub v1 — d'après la documentation fournie :
 #   base API : /api/v1
@@ -55,6 +65,37 @@ BRIXHUB_AUTH_HEADER = os.getenv("BRIXHUB_AUTH_HEADER", "X-API-Key").strip() or "
 BRIXHUB_AUTH_SCHEME = os.getenv("BRIXHUB_AUTH_SCHEME", "").strip()
 BRIXHUB_USER_AGENT = os.getenv("BRIXHUB_USER_AGENT", UA).strip() or UA
 BRIXHUB_ENABLED = bool(BRIXHUB_API_KEY)
+
+# X API v2 — lecture de profil public par username.
+# Configurez uniquement côté serveur dans .env :
+#   X_BEARER_TOKEN=...
+# Optionnel :
+#   X_BASE_URL=https://api.x.com
+X_BASE_URL = os.getenv("X_BASE_URL", "https://api.x.com").rstrip("/")
+X_BEARER_TOKEN = os.getenv("X_BEARER_TOKEN", "").strip()
+X_ENABLED = bool(X_BEARER_TOKEN)
+
+# LinkedIn via RapidAPI — optionnel, désactivé si RAPIDAPI_KEY ou le host n'est pas configuré.
+# Le plugin reste générique car chaque API RapidAPI a ses propres chemins/paramètres.
+# Configuration minimale dans .env :
+#   RAPIDAPI_KEY=...
+#   LINKEDIN_RAPIDAPI_HOST=exemple.p.rapidapi.com
+#   LINKEDIN_RAPIDAPI_ENDPOINT=/profile
+# Optionnel :
+#   LINKEDIN_RAPIDAPI_METHOD=GET ou POST
+#   LINKEDIN_RAPIDAPI_PARAM=url
+#   LINKEDIN_RAPIDAPI_BASE_URL=https://<host>
+RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY", "").strip()
+LINKEDIN_RAPIDAPI_HOST = os.getenv("LINKEDIN_RAPIDAPI_HOST", "").strip()
+LINKEDIN_RAPIDAPI_ENDPOINT = os.getenv("LINKEDIN_RAPIDAPI_ENDPOINT", "").strip()
+LINKEDIN_RAPIDAPI_METHOD = os.getenv("LINKEDIN_RAPIDAPI_METHOD", "GET").strip().upper()
+LINKEDIN_RAPIDAPI_PARAM = os.getenv("LINKEDIN_RAPIDAPI_PARAM", "url").strip() or "url"
+LINKEDIN_RAPIDAPI_BASE_URL = os.getenv("LINKEDIN_RAPIDAPI_BASE_URL", "").strip().rstrip("/")
+LINKEDIN_ENABLED = bool(RAPIDAPI_KEY and LINKEDIN_RAPIDAPI_HOST and LINKEDIN_RAPIDAPI_ENDPOINT)
+X_USER_FIELDS = os.getenv(
+    "X_USER_FIELDS",
+    "created_at,description,location,public_metrics,verified,verified_type,profile_image_url,url"
+).strip()
 _CACHE = {}
 _CACHE_TTL = 300
 _CACHE_LOCK = Lock()
@@ -330,6 +371,1004 @@ def search_domain(domain, lightweight=False):
     return _set_cache(("domain", domain, lightweight), out)
 
 
+
+
+def _safe_post(url, *, json=None, params=None, headers=None, timeout=TIMEOUT):
+    try:
+        merged = {"User-Agent": UA, "Accept": "application/json"}
+        if headers:
+            merged.update(headers)
+        return http.post(url, params=params, json=json, headers=merged, timeout=timeout)
+    except http.exceptions.RequestException as exc:
+        return exc
+
+
+def _linkedin_url_from_query(q):
+    q = (q or "").strip()
+    if not q:
+        return ""
+    if q.startswith("http://") or q.startswith("https://"):
+        return q
+    username = q.strip().lstrip("@/")
+    username = username.replace("https://www.linkedin.com/in/", "").replace("https://linkedin.com/in/", "")
+    username = username.strip("/")
+    return f"https://www.linkedin.com/in/{username}/"
+
+
+def _deep_find_first(obj, keys):
+    """Recherche prudente d'un champ dans une réponse JSON variable RapidAPI."""
+    if obj is None:
+        return None
+    if isinstance(obj, dict):
+        lower = {str(k).lower(): v for k, v in obj.items()}
+        for key in keys:
+            if key.lower() in lower and lower[key.lower()] not in (None, ""):
+                return lower[key.lower()]
+        for v in obj.values():
+            found = _deep_find_first(v, keys)
+            if found not in (None, ""):
+                return found
+    elif isinstance(obj, list):
+        for item in obj[:10]:
+            found = _deep_find_first(item, keys)
+            if found not in (None, ""):
+                return found
+    return None
+
+
+def _compact_linkedin_payload(payload):
+    if isinstance(payload, dict):
+        profile = {
+            "full_name": _deep_find_first(payload, ["full_name", "fullname", "name", "nom", "display_name"]),
+            "first_name": _deep_find_first(payload, ["first_name", "firstname", "prenom"]),
+            "last_name": _deep_find_first(payload, ["last_name", "lastname", "nom_famille"]),
+            "headline": _deep_find_first(payload, ["headline", "title", "occupation", "poste", "fonction"]),
+            "location": _deep_find_first(payload, ["location", "geo", "city", "ville", "localisation"]),
+            "company": _deep_find_first(payload, ["company", "current_company", "organization", "organisation", "societe"]),
+            "profile_url": _deep_find_first(payload, ["profile_url", "linkedin_url", "url", "public_profile_url"]),
+            "avatar_url": _deep_find_first(payload, ["profile_pic_url", "profile_picture", "avatar", "avatar_url", "image"]),
+            "summary": _compact_text(_deep_find_first(payload, ["summary", "about", "description", "bio"]), 700),
+        }
+        # Nettoyage des objets/lists mal mappés.
+        profile = {k: (_compact_text(v, 260) if not isinstance(v, (dict, list)) else "") for k, v in profile.items() if v not in (None, "", [], {})}
+        return profile
+    return {}
+
+
+def search_linkedin_rapidapi(q, profile_url=None):
+    """Lecture optionnelle d'un profil LinkedIn via une API RapidAPI configurée.
+
+    Le plugin n'impose aucun fournisseur RapidAPI : il envoie l'URL LinkedIn au host et
+    endpoint configurés dans .env, puis extrait seulement les champs utiles au score.
+    """
+    q = (q or "").strip()
+    profile_url = (profile_url or "").strip() or _linkedin_url_from_query(q)
+    if not q and not profile_url:
+        return {"ok": False, "type": "linkedin", "error": "Pseudo ou URL LinkedIn manquant."}
+    if not LINKEDIN_ENABLED:
+        missing = []
+        if not RAPIDAPI_KEY: missing.append("RAPIDAPI_KEY")
+        if not LINKEDIN_RAPIDAPI_HOST: missing.append("LINKEDIN_RAPIDAPI_HOST")
+        if not LINKEDIN_RAPIDAPI_ENDPOINT: missing.append("LINKEDIN_RAPIDAPI_ENDPOINT")
+        return {"ok": False, "type": "linkedin", "query": q, "profile_url": profile_url, "error": "Configuration LinkedIn/RapidAPI incomplète : " + ", ".join(missing)}
+
+    base = LINKEDIN_RAPIDAPI_BASE_URL or f"https://{LINKEDIN_RAPIDAPI_HOST}"
+    endpoint = LINKEDIN_RAPIDAPI_ENDPOINT if LINKEDIN_RAPIDAPI_ENDPOINT.startswith("/") else "/" + LINKEDIN_RAPIDAPI_ENDPOINT
+    url = base.rstrip("/") + endpoint
+    headers = {
+        "X-RapidAPI-Key": RAPIDAPI_KEY,
+        "X-RapidAPI-Host": LINKEDIN_RAPIDAPI_HOST,
+        "User-Agent": UA,
+        "Accept": "application/json",
+    }
+    cache_key = ("linkedin_rapidapi", LINKEDIN_RAPIDAPI_HOST, LINKEDIN_RAPIDAPI_ENDPOINT, LINKEDIN_RAPIDAPI_METHOD, profile_url.lower())
+    cached = _cached(cache_key)
+    if cached is not None:
+        return cached
+
+    payload = {LINKEDIN_RAPIDAPI_PARAM: profile_url, "url": profile_url, "username": q.strip().lstrip("@")}
+    if LINKEDIN_RAPIDAPI_METHOD == "POST":
+        headers["Content-Type"] = "application/json"
+        r = _safe_post(url, json=payload, headers=headers, timeout=(8, 20))
+    else:
+        try:
+            r = http.get(url, params={LINKEDIN_RAPIDAPI_PARAM: profile_url}, headers=headers, timeout=(8, 20))
+        except http.exceptions.RequestException as exc:
+            r = exc
+
+    if isinstance(r, Exception):
+        return _set_cache(cache_key, {"ok": False, "type": "linkedin", "query": q, "profile_url": profile_url, "error": f"LinkedIn RapidAPI indisponible : {type(r).__name__}"})
+    status = getattr(r, "status_code", 0)
+    if not (200 <= status < 300):
+        preview = ""
+        try:
+            preview = _compact_text(r.text, 700)
+        except Exception:
+            pass
+        return _set_cache(cache_key, {"ok": False, "type": "linkedin", "query": q, "profile_url": profile_url, "endpoint": url, "status_code": status, "error": f"LinkedIn RapidAPI HTTP {status}", "response_preview": preview})
+    try:
+        raw = r.json()
+    except Exception:
+        raw = {}
+    profile = _compact_linkedin_payload(raw)
+    if profile_url and not profile.get("profile_url"):
+        profile["profile_url"] = profile_url
+    return _set_cache(cache_key, {
+        "ok": True,
+        "type": "linkedin",
+        "query": q,
+        "found": bool(profile),
+        "endpoint": url,
+        "method": LINKEDIN_RAPIDAPI_METHOD,
+        "profile_url": profile_url,
+        "profile": profile,
+        "notice": "Données structurées extraites via RapidAPI. Elles servent uniquement d'indices pour le score de corrélation.",
+    })
+
+def search_github_profile(username):
+    """Lecture publique d'un profil GitHub. Aucune clé API requise.
+
+    Usage prévu : audit défensif d'un compte/pseudo fourni volontairement.
+    """
+    username = (username or "").strip().lstrip("@")
+    if not _USERNAME_RE.match(username):
+        return {"ok": False, "type": "github", "error": "Nom GitHub invalide."}
+    cache_key = ("github", username.lower())
+    cached = _cached(cache_key)
+    if cached is not None:
+        return cached
+    url = f"{GITHUB_API_URL}/{username}"
+    r = _safe_get(url, timeout=(5, 10))
+    if isinstance(r, Exception):
+        return _set_cache(cache_key, {"ok": False, "type": "github", "query": username, "error": f"GitHub indisponible : {type(r).__name__}"})
+    if r.status_code == 404:
+        return _set_cache(cache_key, {"ok": True, "type": "github", "query": username, "found": False, "endpoint": url})
+    if r.status_code in (403, 429):
+        return _set_cache(cache_key, {"ok": False, "type": "github", "query": username, "status_code": r.status_code, "error": "GitHub bloque ou limite temporairement les requêtes."})
+    if not (200 <= r.status_code < 300):
+        return _set_cache(cache_key, {"ok": False, "type": "github", "query": username, "status_code": r.status_code, "error": f"GitHub HTTP {r.status_code}"})
+    try:
+        data = r.json()
+    except Exception:
+        data = {}
+    profile = {
+        "login": data.get("login"),
+        "id": data.get("id"),
+        "name": _compact_text(data.get("name"), 180),
+        "company": _compact_text(data.get("company"), 180),
+        "blog": _compact_text(data.get("blog"), 240),
+        "location": _compact_text(data.get("location"), 180),
+        "email": data.get("email"),
+        "bio": _compact_text(data.get("bio"), 500),
+        "twitter_username": data.get("twitter_username"),
+        "public_repos": data.get("public_repos"),
+        "followers": data.get("followers"),
+        "following": data.get("following"),
+        "created_at": data.get("created_at"),
+        "updated_at": data.get("updated_at"),
+        "avatar_url": data.get("avatar_url"),
+        "html_url": data.get("html_url"),
+    }
+    return _set_cache(cache_key, {
+        "ok": True,
+        "type": "github",
+        "query": username,
+        "found": True,
+        "endpoint": url,
+        "profile": profile,
+        "notice": "Métadonnées publiques GitHub uniquement. Aucun dépôt privé ni donnée authentifiée n'est consulté.",
+    })
+
+
+def search_wikidata(q):
+    """Recherche simple Wikidata/Wikipédia via l'API publique MediaWiki."""
+    q = (q or "").strip()
+    if len(q) < 2:
+        return {"ok": False, "type": "wikidata", "error": "Requête Wikidata trop courte."}
+    cache_key = ("wikidata", q.lower())
+    cached = _cached(cache_key)
+    if cached is not None:
+        return cached
+    params = {
+        "action": "wbsearchentities",
+        "format": "json",
+        "language": "fr",
+        "uselang": "fr",
+        "type": "item",
+        "limit": 5,
+        "search": q,
+    }
+    r = _safe_get(WIKIDATA_API_URL, params=params, timeout=(5, 10))
+    if isinstance(r, Exception):
+        return _set_cache(cache_key, {"ok": False, "type": "wikidata", "query": q, "error": f"Wikidata indisponible : {type(r).__name__}"})
+    if not (200 <= r.status_code < 300):
+        return _set_cache(cache_key, {"ok": False, "type": "wikidata", "query": q, "status_code": r.status_code, "error": f"Wikidata HTTP {r.status_code}"})
+    try:
+        payload = r.json()
+    except Exception:
+        payload = {}
+    results = []
+    for item in (payload.get("search") or [])[:5]:
+        if not isinstance(item, dict):
+            continue
+        qid = item.get("id")
+        results.append({
+            "id": qid,
+            "label": _compact_text(item.get("label"), 180),
+            "description": _compact_text(item.get("description"), 240),
+            "url": item.get("concepturi") or (f"https://www.wikidata.org/wiki/{qid}" if qid else None),
+            "match": item.get("match", {}).get("text") if isinstance(item.get("match"), dict) else None,
+        })
+    return _set_cache(cache_key, {
+        "ok": True,
+        "type": "wikidata",
+        "query": q,
+        "count": len(results),
+        "results": results,
+        "source": WIKIDATA_API_URL,
+        "notice": "Recherche publique Wikidata. À interpréter surtout pour personnes publiques, organisations, projets ou entités notables.",
+    })
+
+
+def _norm_for_score(value):
+    value = "" if value is None else str(value).strip().lower()
+    value = re.sub(r"https?://", "", value)
+    value = re.sub(r"^www\.", "", value)
+    value = re.sub(r"[^a-z0-9àâäéèêëîïôöùûüçñ._@ -]+", " ", value)
+    value = re.sub(r"\s+", " ", value).strip(" .-/")
+    return value
+
+
+def _add_signal(bucket, kind, value, source, weight=1, url=None):
+    value_s = "" if value is None else str(value).strip()
+    if not value_s:
+        return
+    norm = _norm_for_score(value_s)
+    if len(norm) < 2:
+        return
+    bucket.append({"kind": kind, "value": value_s, "norm": norm, "source": source, "weight": weight, "url": url})
+
+
+def _signals_from_crossref(data):
+    signals = []
+    base = data.get("results") if isinstance(data, dict) else {}
+    if isinstance(base, dict):
+        for item in (base.get("results") or [])[:40]:
+            _add_signal(signals, "profile_url", item.get("url"), item.get("platform") or "Présence web", 1, item.get("url"))
+            _add_signal(signals, "platform", item.get("platform"), item.get("platform") or "Présence web", 1, item.get("url"))
+
+    gh = data.get("github") if isinstance(data, dict) else None
+    if isinstance(gh, dict) and gh.get("ok") and gh.get("found"):
+        p = gh.get("profile") or {}
+        _add_signal(signals, "username", p.get("login"), "GitHub", 2, p.get("html_url"))
+        _add_signal(signals, "display_name", p.get("name"), "GitHub", 3, p.get("html_url"))
+        _add_signal(signals, "organization", p.get("company"), "GitHub", 2, p.get("html_url"))
+        _add_signal(signals, "location", p.get("location"), "GitHub", 2, p.get("html_url"))
+        _add_signal(signals, "domain_or_url", p.get("blog"), "GitHub", 2, p.get("html_url"))
+        _add_signal(signals, "bio", p.get("bio"), "GitHub", 1, p.get("html_url"))
+        _add_signal(signals, "username", p.get("twitter_username"), "GitHub/X", 2, p.get("html_url"))
+
+    rd = data.get("reddit") if isinstance(data, dict) else None
+    if isinstance(rd, dict) and rd.get("ok") and rd.get("found"):
+        p = rd.get("profile") or {}
+        _add_signal(signals, "username", p.get("name"), "Reddit", 2, p.get("url"))
+        _add_signal(signals, "bio", p.get("subreddit_title"), "Reddit", 1, p.get("url"))
+        _add_signal(signals, "bio", p.get("subreddit_public_description"), "Reddit", 1, p.get("url"))
+
+    li = data.get("linkedin") if isinstance(data, dict) else None
+    if isinstance(li, dict) and li.get("ok") and li.get("found"):
+        p = li.get("profile") or {}
+        _add_signal(signals, "profile_url", p.get("profile_url") or li.get("profile_url"), "LinkedIn", 2, p.get("profile_url") or li.get("profile_url"))
+        _add_signal(signals, "display_name", p.get("full_name"), "LinkedIn", 3, p.get("profile_url") or li.get("profile_url"))
+        _add_signal(signals, "display_name", " ".join([str(p.get("first_name") or ""), str(p.get("last_name") or "")]).strip(), "LinkedIn", 2, p.get("profile_url") or li.get("profile_url"))
+        _add_signal(signals, "location", p.get("location"), "LinkedIn", 2, p.get("profile_url") or li.get("profile_url"))
+        _add_signal(signals, "organization", p.get("company"), "LinkedIn", 2, p.get("profile_url") or li.get("profile_url"))
+        _add_signal(signals, "bio", p.get("headline"), "LinkedIn", 1, p.get("profile_url") or li.get("profile_url"))
+        _add_signal(signals, "bio", p.get("summary"), "LinkedIn", 1, p.get("profile_url") or li.get("profile_url"))
+
+    xp = data.get("x_profile") if isinstance(data, dict) else None
+    if isinstance(xp, dict) and xp.get("ok") and xp.get("found"):
+        p = xp.get("profile") or {}
+        _add_signal(signals, "username", p.get("username"), "X", 2, p.get("url"))
+        _add_signal(signals, "display_name", p.get("name"), "X", 3, p.get("url"))
+        _add_signal(signals, "location", p.get("location"), "X", 2, p.get("url"))
+        _add_signal(signals, "domain_or_url", p.get("external_url"), "X", 2, p.get("url"))
+        _add_signal(signals, "bio", p.get("description"), "X", 1, p.get("url"))
+
+    sc = data.get("social_cli") if isinstance(data, dict) else None
+    if isinstance(sc, dict) and sc.get("ok"):
+        for r in (sc.get("results") or [])[:80]:
+            _add_signal(signals, "profile_url", r.get("url"), r.get("site") or sc.get("tool") or "Maigret/Sherlock", 1, r.get("url"))
+            for k, v in (r.get("details") or {}).items():
+                if k in ("username", "nickname", "uid"):
+                    _add_signal(signals, "username", v, r.get("site") or "Maigret", 1, r.get("url"))
+                elif k in ("fullname", "name", "tagline"):
+                    _add_signal(signals, "display_name", v, r.get("site") or "Maigret", 2, r.get("url"))
+                elif k in ("country", "location", "city"):
+                    _add_signal(signals, "location", v, r.get("site") or "Maigret", 1, r.get("url"))
+                elif k in ("company", "role"):
+                    _add_signal(signals, "organization", v, r.get("site") or "Maigret", 1, r.get("url"))
+
+    bx = data.get("brixhub") if isinstance(data, dict) else None
+    if isinstance(bx, dict) and bx.get("ok"):
+        payload = bx.get("results") or {}
+        payload_data = payload.get("data") if isinstance(payload, dict) else {}
+        profiles = payload_data.get("results") if isinstance(payload_data, dict) else payload.get("results", []) if isinstance(payload, dict) else []
+        for p in (profiles or [])[:5]:
+            if not isinstance(p, dict):
+                continue
+            _add_signal(signals, "display_name", " ".join([str(p.get("prenom") or ""), str(p.get("nom_famille") or "")]).strip(), "BrixHub", 3)
+            _add_signal(signals, "username", p.get("nom_utilisateur"), "BrixHub", 2)
+            _add_signal(signals, "location", p.get("ville"), "BrixHub", 2)
+            _add_signal(signals, "organization", p.get("societe"), "BrixHub", 2)
+            _add_signal(signals, "email", p.get("email"), "BrixHub", 3)
+            if p.get("_confidence") is not None:
+                _add_signal(signals, "confidence", p.get("_confidence"), "BrixHub", 1)
+
+    ent = data.get("entreprise") if isinstance(data, dict) else None
+    if isinstance(ent, dict) and ent.get("ok"):
+        for e in (ent.get("results") or [])[:5]:
+            _add_signal(signals, "organization", e.get("nom_complet"), "API Entreprises", 2)
+            _add_signal(signals, "location", e.get("adresse"), "API Entreprises", 1)
+            for d in (e.get("dirigeants") or [])[:3]:
+                _add_signal(signals, "display_name", " ".join([str(d.get("prenoms") or ""), str(d.get("nom") or "")]).strip(), "API Entreprises", 2)
+
+    wd = data.get("wikidata") if isinstance(data, dict) else None
+    if isinstance(wd, dict) and wd.get("ok"):
+        for item in (wd.get("results") or [])[:5]:
+            _add_signal(signals, "display_name", item.get("label"), "Wikidata", 2, item.get("url"))
+            _add_signal(signals, "bio", item.get("description"), "Wikidata", 1, item.get("url"))
+            _add_signal(signals, "domain_or_url", item.get("url"), "Wikidata", 1, item.get("url"))
+    return signals
+
+
+def compute_correlation_score(data):
+    """Calcule un score de concordance prudent, non conclusif.
+
+    Le score mesure la cohérence d'indices publics entre modules. Il ne prouve pas
+    une identité réelle et ne doit pas être présenté comme une identification certaine.
+    """
+    q = (data.get("query") or "").strip()
+    q_norm = _norm_for_score(q.lstrip("@"))
+    typ = data.get("type") or "auto"
+    signals = _signals_from_crossref(data)
+    reasons = []
+    warnings = ["Score indicatif : il mesure une concordance d'indices publics, pas une preuve d'identité."]
+    score = 0
+
+    profile_urls = [s for s in signals if s["kind"] == "profile_url"]
+    unique_domains = set()
+    for s in profile_urls:
+        try:
+            unique_domains.add(urlparse(s["value"]).netloc.lower().replace("www.", ""))
+        except Exception:
+            pass
+    presence_count = len(unique_domains) or len(profile_urls)
+    if presence_count >= 1:
+        add = min(25, 8 + presence_count * 3)
+        score += add
+        reasons.append({"label": "Présence multi-plateforme", "points": add, "detail": f"{presence_count} profil(s)/domaine(s) public(s) distinct(s) détecté(s)."})
+
+    username_sources = {s["source"] for s in signals if s["kind"] == "username" and s["norm"] == q_norm}
+    if q_norm and username_sources:
+        add = min(18, 8 + 4 * len(username_sources))
+        score += add
+        reasons.append({"label": "Pseudo exact recoupé", "points": add, "detail": "Même pseudo retrouvé via " + ", ".join(sorted(username_sources)) + "."})
+
+    def duplicates_for(kind):
+        groups = {}
+        for s in signals:
+            if s["kind"] != kind:
+                continue
+            if kind == "display_name" and s["norm"] == q_norm:
+                continue
+            if len(s["norm"]) < 3:
+                continue
+            groups.setdefault(s["norm"], set()).add(s["source"])
+        return [(k, v) for k, v in groups.items() if len(v) >= 2]
+
+    name_dups = duplicates_for("display_name")
+    if name_dups:
+        best = max(name_dups, key=lambda kv: len(kv[1]))
+        add = min(20, 10 + 5 * len(best[1]))
+        score += add
+        reasons.append({"label": "Nom affiché cohérent", "points": add, "detail": f"Nom/affichage similaire retrouvé dans {len(best[1])} source(s) : {', '.join(sorted(best[1]))}."})
+
+    loc_dups = duplicates_for("location")
+    if loc_dups:
+        best = max(loc_dups, key=lambda kv: len(kv[1]))
+        add = min(15, 6 + 4 * len(best[1]))
+        score += add
+        reasons.append({"label": "Localisation cohérente", "points": add, "detail": f"Indice de localisation similaire dans {len(best[1])} source(s)."})
+
+    org_dups = duplicates_for("organization")
+    if org_dups:
+        best = max(org_dups, key=lambda kv: len(kv[1]))
+        add = min(15, 6 + 4 * len(best[1]))
+        score += add
+        reasons.append({"label": "Organisation cohérente", "points": add, "detail": f"Organisation/société similaire dans {len(best[1])} source(s)."})
+
+    # Domaine / URL externe : utile pour relier GitHub, X, Wikidata ou profil perso.
+    domains = {}
+    for s in signals:
+        if s["kind"] != "domain_or_url":
+            continue
+        value = s["value"]
+        try:
+            dom = _normalize_domain(value)
+            if dom and "." in dom:
+                domains.setdefault(dom, set()).add(s["source"])
+        except Exception:
+            continue
+    domain_dups = [(d, srcs) for d, srcs in domains.items() if len(srcs) >= 2]
+    if domain_dups:
+        best = max(domain_dups, key=lambda kv: len(kv[1]))
+        add = min(12, 5 + 4 * len(best[1]))
+        score += add
+        reasons.append({"label": "Site/domaine recoupé", "points": add, "detail": f"Même domaine externe repéré via {', '.join(sorted(best[1]))}."})
+
+    # BrixHub expose déjà un score interne ; on l'intègre faiblement pour ne pas dominer.
+    conf_values = []
+    for s in signals:
+        if s["kind"] == "confidence":
+            try:
+                conf_values.append(float(s["value"]))
+            except Exception:
+                pass
+    if conf_values:
+        conf = max(conf_values)
+        add = int(min(10, max(0, conf) / 10))
+        score += add
+        reasons.append({"label": "Confiance source externe", "points": add, "detail": f"Score interne maximal observé : {int(conf)}/100."})
+
+    score = max(0, min(100, int(score)))
+    if score < 35:
+        level = "faible"
+        color = "low"
+    elif score < 65:
+        level = "moyen"
+        color = "mid"
+    else:
+        level = "fort"
+        color = "good"
+        warnings.append("Même avec un niveau fort, une validation humaine reste nécessaire avant toute conclusion.")
+
+    return {
+        "ok": True,
+        "type": "correlation_score",
+        "query": q,
+        "target_type": typ,
+        "score": score,
+        "level": level,
+        "color": color,
+        "reasons": reasons,
+        "signals_count": len(signals),
+        "sources_count": len({s["source"] for s in signals}),
+        "warnings": warnings,
+    }
+
+
+
+
+def _compact_text(value, limit=260):
+    value = "" if value is None else str(value).strip()
+    return value if len(value) <= limit else value[:limit - 1] + "…"
+
+
+def search_entreprise(q):
+    """Recherche défensive dans l'API publique des entreprises françaises.
+
+    Usage prévu : audit d'exposition d'un nom, pseudo ou société fourni volontairement.
+    Aucune clé API n'est requise.
+    """
+    q = (q or "").strip()
+    if len(q) < 2:
+        return {"ok": False, "type": "entreprise", "error": "Requête entreprise trop courte."}
+    cache_key = ("entreprise", q.lower())
+    cached = _cached(cache_key)
+    if cached is not None:
+        return cached
+
+    params = {"q": q, "page": 1, "per_page": 5}
+    r = _safe_get(ENTREPRISE_API_URL, params=params, timeout=(6, 12))
+    if isinstance(r, Exception):
+        return _set_cache(cache_key, {"ok": False, "type": "entreprise", "query": q, "error": f"API Entreprises indisponible : {type(r).__name__}"})
+    if not (200 <= r.status_code < 300):
+        return _set_cache(cache_key, {"ok": False, "type": "entreprise", "query": q, "status_code": r.status_code, "error": f"API Entreprises HTTP {r.status_code}"})
+    try:
+        data = r.json()
+    except Exception:
+        return _set_cache(cache_key, {"ok": False, "type": "entreprise", "query": q, "error": "Réponse API Entreprises non JSON."})
+
+    raw_results = data.get("results") or data.get("data") or []
+    out_results = []
+    for item in raw_results[:5]:
+        if not isinstance(item, dict):
+            continue
+        dirigeants = []
+        for d in (item.get("dirigeants") or [])[:5]:
+            if not isinstance(d, dict):
+                continue
+            dirigeants.append({
+                "nom": _compact_text(d.get("nom") or d.get("nom_famille")),
+                "prenoms": _compact_text(d.get("prenoms") or d.get("prenom")),
+                "qualite": _compact_text(d.get("qualite") or d.get("fonction") or d.get("type_dirigeant")),
+                "annee_naissance": d.get("annee_naissance"),
+            })
+        siege = item.get("siege") if isinstance(item.get("siege"), dict) else {}
+        out_results.append({
+            "nom_complet": _compact_text(item.get("nom_complet") or item.get("nom_raison_sociale") or item.get("nom") or item.get("raison_sociale")),
+            "siren": item.get("siren"),
+            "siret_siege": item.get("siret_siege") or siege.get("siret"),
+            "etat_administratif": item.get("etat_administratif") or item.get("etat_administratif_entreprise"),
+            "nature_juridique": _compact_text(item.get("nature_juridique") or item.get("forme_juridique")),
+            "activite_principale": item.get("activite_principale") or item.get("section_activite_principale"),
+            "categorie_entreprise": item.get("categorie_entreprise"),
+            "date_creation": item.get("date_creation"),
+            "adresse": _compact_text(item.get("adresse") or siege.get("adresse") or siege.get("libelle_commune")),
+            "dirigeants": dirigeants,
+        })
+    return _set_cache(cache_key, {
+        "ok": True,
+        "type": "entreprise",
+        "query": q,
+        "count": len(out_results),
+        "results": out_results,
+        "source": ENTREPRISE_API_URL,
+        "notice": "Recherche effectuée sur l'API publique recherche-entreprises.api.gouv.fr. Usage recommandé : audit autorisé ou recherche d'une société/personne déclarée publiquement.",
+    })
+
+
+def reddit_user_info(username):
+    """Récupère uniquement les métadonnées publiques du profil Reddit, sans scraper les commentaires."""
+    username = (username or "").strip().lstrip("@")
+    if not _USERNAME_RE.match(username):
+        return {"ok": False, "type": "reddit", "error": "Nom Reddit invalide."}
+    cache_key = ("reddit", username.lower())
+    cached = _cached(cache_key)
+    if cached is not None:
+        return cached
+    url = f"https://www.reddit.com/user/{username}/about.json"
+    r = _safe_get(url, timeout=(5, 10))
+    if isinstance(r, Exception):
+        return _set_cache(cache_key, {"ok": False, "type": "reddit", "query": username, "error": f"Reddit indisponible : {type(r).__name__}"})
+    if r.status_code == 404:
+        return _set_cache(cache_key, {"ok": True, "type": "reddit", "query": username, "found": False, "results": None})
+    if r.status_code in (403, 429):
+        return _set_cache(cache_key, {"ok": False, "type": "reddit", "query": username, "status_code": r.status_code, "error": "Reddit bloque ou limite temporairement les requêtes."})
+    if not (200 <= r.status_code < 300):
+        return _set_cache(cache_key, {"ok": False, "type": "reddit", "query": username, "status_code": r.status_code, "error": f"Reddit HTTP {r.status_code}"})
+    try:
+        payload = r.json().get("data", {})
+    except Exception:
+        payload = {}
+    created_utc = payload.get("created_utc")
+    return _set_cache(cache_key, {
+        "ok": True,
+        "type": "reddit",
+        "query": username,
+        "found": True,
+        "profile": {
+            "name": payload.get("name") or username,
+            "url": f"https://www.reddit.com/user/{username}/",
+            "created_utc": created_utc,
+            "created_iso": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(created_utc)) if created_utc else None,
+            "comment_karma": payload.get("comment_karma"),
+            "link_karma": payload.get("link_karma"),
+            "total_karma": payload.get("total_karma"),
+            "is_gold": payload.get("is_gold"),
+            "is_mod": payload.get("is_mod"),
+            "verified": payload.get("verified"),
+            "over_18": payload.get("over_18"),
+            "subreddit_title": ((payload.get("subreddit") or {}).get("title") if isinstance(payload.get("subreddit"), dict) else None),
+            "subreddit_public_description": _compact_text(((payload.get("subreddit") or {}).get("public_description") if isinstance(payload.get("subreddit"), dict) else None), 500),
+        },
+        "notice": "Métadonnées publiques Reddit uniquement ; pas d'analyse de commentaires dans cette version.",
+    })
+
+
+def _parse_cli_json(text):
+    text = (text or "").strip()
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        try:
+            return json.loads(text[start:end + 1])
+        except Exception:
+            return None
+    return None
+
+
+def _extract_urls_from_text(text, max_items=80):
+    urls = []
+    seen = set()
+    for m in re.finditer(r"https?://[^\s)>'\"]+", text or ""):
+        url = m.group(0).rstrip(".,;]")
+        if url not in seen:
+            seen.add(url)
+            urls.append({"url": url})
+            if len(urls) >= max_items:
+                break
+    return urls
+
+
+
+
+def _extract_maigret_text_results(text, max_items=80):
+    """Parse la sortie texte standard de Maigret.
+
+    Sur Windows, Maigret fonctionne souvent avec `python -m maigret pseudo`,
+    mais ne produit pas toujours un JSON exploitable directement. Cette fonction
+    extrait donc les lignes `[+] Site: https://...` et quelques détails affichés
+    juste en dessous.
+    """
+    results = []
+    current = None
+    seen = set()
+    for raw_line in (text or "").splitlines():
+        line = raw_line.strip()
+        m = re.match(r"^\[\+\]\s+([^:]+):\s+(https?://\S+)", line)
+        if m:
+            site = m.group(1).strip()
+            url = m.group(2).rstrip(".,;])")
+            if url not in seen:
+                seen.add(url)
+                current = {"site": site, "url": url, "status": "found", "details": {}}
+                results.append(current)
+                if len(results) >= max_items:
+                    break
+            else:
+                current = None
+            continue
+
+        if current and ("├─" in line or "└─" in line or "|-" in line):
+            detail = line.replace("├─", "").replace("└─", "").replace("|-", "").strip()
+            if ":" in detail:
+                k, v = detail.split(":", 1)
+                k = re.sub(r"[^a-zA-Z0-9_ -]", "", k).strip().lower().replace(" ", "_")
+                v = v.strip()
+                if k and v:
+                    current.setdefault("details", {})[k] = v
+
+    if results:
+        return results[:max_items]
+    return _extract_urls_from_text(text, max_items=max_items)
+
+
+def _compact_maigret_json(data, max_items=80):
+    results = []
+    if isinstance(data, dict):
+        sites = data.get("sites") if isinstance(data.get("sites"), dict) else data
+        if isinstance(sites, dict):
+            for name, value in sites.items():
+                if len(results) >= max_items:
+                    break
+                if not isinstance(value, dict):
+                    continue
+                status = str(value.get("status") or value.get("status_code") or "").lower()
+                url = value.get("url_user") or value.get("url") or value.get("profile_url")
+                if url and ("claim" in status or "found" in status or value.get("exists") is True or value.get("status") in (200, "200")):
+                    results.append({
+                        "site": name,
+                        "url": url,
+                        "status": value.get("status") or value.get("status_code") or "found",
+                        "tags": value.get("tags") if isinstance(value.get("tags"), list) else [],
+                    })
+    return results
+
+
+def _script_command_candidates(command_name):
+    """Retourne les commandes possibles, même si le dossier Scripts n'est pas dans PATH."""
+    candidates = []
+
+    direct = shutil.which(command_name)
+    if direct:
+        candidates.append([direct])
+
+    scripts_dir = sysconfig.get_path("scripts")
+    if scripts_dir:
+        possible_names = [
+            command_name,
+            f"{command_name}.exe",
+            f"{command_name}.cmd",
+            f"{command_name}.bat",
+            f"{command_name}-script.py",
+        ]
+        for name in possible_names:
+            path = os.path.join(scripts_dir, name)
+            if os.path.exists(path):
+                if path.endswith(".py"):
+                    candidates.append([sys.executable, path])
+                else:
+                    candidates.append([path])
+
+    # Déduplication sans casser l'ordre de priorité.
+    deduped = []
+    seen = set()
+    for c in candidates:
+        key = tuple(c)
+        if key not in seen:
+            seen.add(key)
+            deduped.append(c)
+    return deduped
+
+
+def _social_cli_candidates(tool):
+    """Détecte Maigret/Sherlock via PATH, Scripts Python ou python -m."""
+    candidates = []
+
+    if tool in ("auto", "maigret"):
+        for base in _script_command_candidates("maigret"):
+            candidates.append({"tool": "maigret", "base": base, "how": "script"})
+        if importlib.util.find_spec("maigret") is not None:
+            candidates.append({"tool": "maigret", "base": [sys.executable, "-m", "maigret"], "how": "python -m"})
+
+    if tool in ("auto", "sherlock"):
+        for base in _script_command_candidates("sherlock"):
+            candidates.append({"tool": "sherlock", "base": base, "how": "script"})
+        # Selon les installations, le module peut s'appeler sherlock ou sherlock_project.
+        if importlib.util.find_spec("sherlock") is not None:
+            candidates.append({"tool": "sherlock", "base": [sys.executable, "-m", "sherlock"], "how": "python -m"})
+        elif importlib.util.find_spec("sherlock_project") is not None:
+            candidates.append({"tool": "sherlock", "base": [sys.executable, "-m", "sherlock_project"], "how": "python -m"})
+
+    deduped = []
+    seen = set()
+    for c in candidates:
+        key = (c["tool"], tuple(c["base"]))
+        if key not in seen:
+            seen.add(key)
+            deduped.append(c)
+    return deduped
+
+
+def search_social_cli(username, tool="auto"):
+    """Lance Maigret ou Sherlock si l'outil est installé localement. Aucune clé API.
+
+    Correction Windows : Maigret peut fonctionner en terminal mais échouer dans le
+    plugin si l'ancien appel attend un JSON ou si le timeout total est trop court.
+    Ici on appelle d'abord Maigret en sortie texte simple, puis on parse les URLs.
+    """
+    username = (username or "").strip().lstrip("@")
+    tool = (tool or "auto").lower()
+    if not _USERNAME_RE.match(username):
+        return {"ok": False, "type": "social_cli", "error": "Pseudonyme invalide."}
+    cache_key = ("social_cli", tool, username.lower())
+    cached = _cached(cache_key)
+    if cached is not None:
+        return cached
+
+    candidates = _social_cli_candidates(tool)
+    if not candidates:
+        scripts_dir = sysconfig.get_path("scripts") or ""
+        return _set_cache(cache_key, {
+            "ok": False,
+            "type": "social_cli",
+            "query": username,
+            "error": "Maigret/Sherlock introuvable par le Python qui lance Second-Brain.",
+            "install_help": [
+                "python -m pip install maigret",
+                "python -m pip install sherlock-project",
+                f"Dossier Scripts détecté: {scripts_dir}" if scripts_dir else "Dossier Scripts Python non détecté",
+            ],
+        })
+
+    try:
+        cli_timeout = int(os.getenv("OSINTCX_CLI_TIMEOUT", "90"))
+    except Exception:
+        cli_timeout = 90
+
+    errors = []
+    for candidate in candidates:
+        chosen = candidate["tool"]
+        base = candidate["base"]
+        try:
+            if chosen == "maigret":
+                # Appel volontairement minimal : c'est exactement le mode qui marche
+                # dans ton terminal avec `python -m maigret testuser`.
+                cmd = base + [username]
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=cli_timeout, encoding="utf-8", errors="ignore")
+                output = (proc.stdout or "") + "\n" + (proc.stderr or "")
+                results = _extract_maigret_text_results(output)
+            else:
+                cmd = base + [username, "--print-found", "--timeout", "15"]
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=cli_timeout, encoding="utf-8", errors="ignore")
+                output = (proc.stdout or "") + "\n" + (proc.stderr or "")
+                results = _extract_urls_from_text(output)
+
+            # Maigret peut écrire beaucoup de warnings et retourner un code non nul ;
+            # si des profils sont extraits, on considère quand même la recherche OK.
+            if results:
+                return _set_cache(cache_key, {
+                    "ok": True,
+                    "type": "social_cli",
+                    "query": username,
+                    "tool": chosen,
+                    "launch_mode": candidate.get("how"),
+                    "command": " ".join(cmd[:3]) + (" ..." if len(cmd) > 3 else ""),
+                    "count": len(results),
+                    "results": results[:80],
+                    "returncode": proc.returncode,
+                    "notice": "Résultats issus d'un outil local. Vérifiez manuellement les profils importants : les faux positifs sont possibles.",
+                })
+
+            errors.append({
+                "tool": chosen,
+                "mode": candidate.get("how"),
+                "returncode": proc.returncode,
+                "stdout_tail": (proc.stdout or "")[-700:],
+                "stderr_tail": (proc.stderr or "")[-700:],
+                "command": " ".join(cmd),
+            })
+        except subprocess.TimeoutExpired as exc:
+            partial = ((exc.stdout or "") if isinstance(exc.stdout, str) else "") + "\n" + ((exc.stderr or "") if isinstance(exc.stderr, str) else "")
+            partial_results = _extract_maigret_text_results(partial) if chosen == "maigret" else _extract_urls_from_text(partial)
+            if partial_results:
+                return _set_cache(cache_key, {
+                    "ok": True,
+                    "type": "social_cli",
+                    "query": username,
+                    "tool": chosen,
+                    "launch_mode": candidate.get("how"),
+                    "command": " ".join((base + [username])[:3]) + " ...",
+                    "count": len(partial_results),
+                    "results": partial_results[:80],
+                    "returncode": "timeout",
+                    "notice": "Recherche interrompue par timeout, mais des profils partiels ont été extraits. Augmente OSINTCX_CLI_TIMEOUT si besoin.",
+                })
+            errors.append({"tool": chosen, "mode": candidate.get("how"), "error": f"Timeout après {cli_timeout}s"})
+        except Exception as exc:
+            errors.append({"tool": chosen, "mode": candidate.get("how"), "error": str(exc)})
+
+    return _set_cache(cache_key, {
+        "ok": False,
+        "type": "social_cli",
+        "query": username,
+        "error": "Maigret/Sherlock détecté, mais aucune commande n'a produit de profil exploitable.",
+        "attempts": errors[:5],
+    })
+
+
+def _x_headers():
+    headers = {
+        "User-Agent": UA,
+        "Accept": "application/json",
+    }
+    if X_BEARER_TOKEN:
+        headers["Authorization"] = f"Bearer {X_BEARER_TOKEN}"
+    return headers
+
+
+def search_x_profile(username):
+    """Lit un profil public X via l'API officielle v2, si X_BEARER_TOKEN est configuré.
+
+    Usage prévu : audit défensif d'un compte fourni volontairement.
+    N'analyse pas les posts et ne suit pas les abonnés.
+    """
+    username = (username or "").strip().lstrip("@")
+    if not _USERNAME_RE.match(username):
+        return {"ok": False, "type": "x", "error": "Nom d'utilisateur X invalide."}
+    if not X_BEARER_TOKEN:
+        return {
+            "ok": False,
+            "type": "x",
+            "enabled": False,
+            "query": username,
+            "error": "X non configuré : définissez X_BEARER_TOKEN côté serveur dans le fichier .env.",
+        }
+
+    cache_key = ("x_profile", username.lower(), X_USER_FIELDS)
+    cached = _cached(cache_key)
+    if cached is not None:
+        return cached
+
+    url = f"{X_BASE_URL}/2/users/by/username/{username}"
+    params = {"user.fields": X_USER_FIELDS}
+    try:
+        r = http.get(url, params=params, headers=_x_headers(), timeout=TIMEOUT)
+    except http.exceptions.RequestException as exc:
+        return _set_cache(cache_key, {
+            "ok": False,
+            "type": "x",
+            "enabled": True,
+            "query": username,
+            "endpoint": url,
+            "error": f"Erreur réseau X API : {type(exc).__name__}",
+        })
+
+    if r.status_code == 404:
+        return _set_cache(cache_key, {"ok": True, "type": "x", "enabled": True, "query": username, "found": False, "endpoint": url})
+    if r.status_code in (401, 403):
+        return _set_cache(cache_key, {
+            "ok": False,
+            "type": "x",
+            "enabled": True,
+            "query": username,
+            "endpoint": url,
+            "status_code": r.status_code,
+            "error": "Accès X API refusé : vérifiez X_BEARER_TOKEN et les droits de votre application X.",
+            "response_preview": getattr(r, "text", "")[:700],
+        })
+    if r.status_code == 429:
+        return _set_cache(cache_key, {
+            "ok": False,
+            "type": "x",
+            "enabled": True,
+            "query": username,
+            "endpoint": url,
+            "status_code": 429,
+            "error": "Limite de requêtes X API atteinte.",
+            "rate_limits": {k: v for k, v in r.headers.items() if k.lower().startswith("x-rate-limit")},
+        })
+    if not (200 <= r.status_code < 300):
+        return _set_cache(cache_key, {
+            "ok": False,
+            "type": "x",
+            "enabled": True,
+            "query": username,
+            "endpoint": url,
+            "status_code": r.status_code,
+            "error": f"X API HTTP {r.status_code}",
+            "response_preview": getattr(r, "text", "")[:700],
+        })
+
+    try:
+        payload = r.json()
+    except Exception:
+        return _set_cache(cache_key, {
+            "ok": False,
+            "type": "x",
+            "enabled": True,
+            "query": username,
+            "endpoint": url,
+            "error": "Réponse X API non JSON.",
+            "response_preview": getattr(r, "text", "")[:700],
+        })
+
+    user = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(user, dict):
+        return _set_cache(cache_key, {
+            "ok": True,
+            "type": "x",
+            "enabled": True,
+            "query": username,
+            "found": False,
+            "endpoint": url,
+            "raw": payload,
+        })
+
+    profile = {
+        "id": user.get("id"),
+        "name": user.get("name"),
+        "username": user.get("username"),
+        "url": f"https://x.com/{user.get('username') or username}",
+        "description": _compact_text(user.get("description"), 700),
+        "location": _compact_text(user.get("location"), 160),
+        "created_at": user.get("created_at"),
+        "verified": user.get("verified"),
+        "verified_type": user.get("verified_type"),
+        "profile_image_url": user.get("profile_image_url"),
+        "external_url": user.get("url"),
+        "public_metrics": user.get("public_metrics") if isinstance(user.get("public_metrics"), dict) else {},
+    }
+    return _set_cache(cache_key, {
+        "ok": True,
+        "type": "x",
+        "enabled": True,
+        "query": username,
+        "found": True,
+        "endpoint": url,
+        "profile": profile,
+        "rate_limits": {k: v for k, v in r.headers.items() if k.lower().startswith("x-rate-limit")},
+        "notice": "Lecture seule du profil public via X API v2. Aucun post, follower ou donnée privée n'est récupéré.",
+    })
+
 def _brixhub_headers(content_type=False):
     headers = {
         "User-Agent": BRIXHUB_USER_AGENT,
@@ -573,8 +1612,25 @@ def crossref(q, typ="auto"):
         return {"ok": False, "error": f"Type inconnu : {typ}"}
 
     data = {"ok": res.get("ok", True), "query": q, "type": typ, "results": res}
-    if request.args.get("brixhub", "0").lower() in ("1", "true", "yes", "on"):
+    truthy = ("1", "true", "yes", "on")
+    if request.args.get("brixhub", "0").lower() in truthy:
         data["brixhub"] = search_brixhub(q, typ)
+    if request.args.get("entreprise", "0").lower() in truthy:
+        data["entreprise"] = search_entreprise(q)
+    if request.args.get("wikidata", "0").lower() in truthy:
+        data["wikidata"] = search_wikidata(q)
+    if typ == "username" and request.args.get("github", "0").lower() in truthy:
+        data["github"] = search_github_profile(q)
+    if typ == "username" and request.args.get("reddit", "0").lower() in truthy:
+        data["reddit"] = reddit_user_info(q)
+    if typ == "username" and request.args.get("x", "0").lower() in truthy:
+        data["x_profile"] = search_x_profile(q)
+    if typ == "username" and request.args.get("linkedin", "0").lower() in truthy:
+        data["linkedin"] = search_linkedin_rapidapi(q, request.args.get("linkedin_url", ""))
+    if typ == "username" and request.args.get("socialcli", "0").lower() in truthy:
+        data["social_cli"] = search_social_cli(q, request.args.get("social_tool", "auto"))
+    if request.args.get("score", "1").lower() in truthy:
+        data["correlation"] = compute_correlation_score(data)
     return data
 
 
@@ -583,7 +1639,7 @@ def register(app, rd_cfg):
 
     @app.route("/api/osintcx/ping", methods=["GET"])
     def osintcx_ping():
-        return jsonify({"ok": True, "plugin": "osint-cx", "version": "1.4", "routes_registered": True})
+        return jsonify({"ok": True, "plugin": "osint-cx", "version": "1.8", "routes_registered": True})
 
     @app.route("/api/osintcx/username", methods=["GET"])
     def osintcx_username():
@@ -604,6 +1660,58 @@ def register(app, rd_cfg):
     @app.route("/api/osintcx/domain", methods=["GET"])
     def osintcx_domain():
         return jsonify(search_domain(request.args.get("q", "")))
+
+    @app.route("/api/osintcx/entreprise", methods=["GET"])
+    def osintcx_entreprise():
+        data = search_entreprise(request.args.get("q", ""))
+        status = 200 if data.get("ok", True) else 400
+        return jsonify(data), status
+
+    @app.route("/api/osintcx/github", methods=["GET"])
+    def osintcx_github():
+        data = search_github_profile(request.args.get("q", ""))
+        status = 200 if data.get("ok", True) else 400
+        return jsonify(data), status
+
+    @app.route("/api/osintcx/wikidata", methods=["GET"])
+    def osintcx_wikidata():
+        data = search_wikidata(request.args.get("q", ""))
+        status = 200 if data.get("ok", True) else 400
+        return jsonify(data), status
+
+    @app.route("/api/osintcx/score", methods=["POST"])
+    def osintcx_score():
+        payload = request.get_json(silent=True) or {}
+        data = compute_correlation_score(payload)
+        return jsonify(data), 200
+
+    @app.route("/api/osintcx/reddit", methods=["GET"])
+    def osintcx_reddit():
+        data = reddit_user_info(request.args.get("q", ""))
+        status = 200 if data.get("ok", True) else 400
+        return jsonify(data), status
+
+    @app.route("/api/osintcx/x", methods=["GET"])
+    def osintcx_x():
+        data = search_x_profile(request.args.get("q", ""))
+        status = 200 if data.get("ok", True) else 400
+        return jsonify(data), status
+
+    @app.route("/api/osintcx/linkedin", methods=["GET", "POST"])
+    def osintcx_linkedin():
+        if request.method == "POST":
+            payload = request.get_json(silent=True) or {}
+            data = search_linkedin_rapidapi(payload.get("q", ""), payload.get("url", ""))
+        else:
+            data = search_linkedin_rapidapi(request.args.get("q", ""), request.args.get("url", ""))
+        status = 200 if data.get("ok", True) else 400
+        return jsonify(data), status
+
+    @app.route("/api/osintcx/social-cli", methods=["GET"])
+    def osintcx_social_cli():
+        data = search_social_cli(request.args.get("q", ""), request.args.get("tool", "auto"))
+        status = 200 if data.get("ok", True) else 400
+        return jsonify(data), status
 
     @app.route("/api/osintcx/brixhub", methods=["GET", "POST"])
     def osintcx_brixhub():

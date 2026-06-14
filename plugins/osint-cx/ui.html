@@ -22,11 +22,63 @@
       <button class="btn bs oscx-type-btn" data-type="ip" onclick="setOsintCxType('ip')">🌐 IP</button>
       <button class="btn bs oscx-type-btn" data-type="domain" onclick="setOsintCxType('domain')">🏛 Domaine</button>
     </div>
-    <label class="oscx-toggle">
-      <input id="oscx-brixhub" type="checkbox" onchange="toggleBrixHubBox()">
-      <span>Inclure BrixHub API</span>
-      <em>POST <code>/api/v1/search</code>, JSON, header <code>X-API-Key</code></em>
-    </label>
+    <div class="oscx-module-grid">
+      <label class="oscx-toggle">
+        <input id="oscx-score" type="checkbox" checked>
+        <span>Score de corrélation</span>
+        <em>multi-indices · prudent, non conclusif</em>
+      </label>
+      <label class="oscx-toggle">
+        <input id="oscx-github" type="checkbox" checked>
+        <span>GitHub public</span>
+        <em>sans clé · profil développeur public</em>
+      </label>
+      <label class="oscx-toggle">
+        <input id="oscx-wikidata" type="checkbox">
+        <span>Wikidata</span>
+        <em>sans clé · entités publiques/notables</em>
+      </label>
+      <label class="oscx-toggle">
+        <input id="oscx-entreprise" type="checkbox">
+        <span>API Entreprises</span>
+        <em>sans clé · sociétés/dirigeants publics</em>
+      </label>
+      <label class="oscx-toggle">
+        <input id="oscx-reddit" type="checkbox">
+        <span>Reddit public</span>
+        <em>sans clé · profil uniquement</em>
+      </label>
+      <label class="oscx-toggle">
+        <input id="oscx-x" type="checkbox">
+        <span>Profil X API</span>
+        <em>avec clé · lecture profil public</em>
+      </label>
+      <label class="oscx-toggle">
+        <input id="oscx-linkedin" type="checkbox" onchange="toggleLinkedInBox()">
+        <span>LinkedIn via RapidAPI</span>
+        <em>avec clé · champs utiles au score</em>
+      </label>
+      <label class="oscx-toggle">
+        <input id="oscx-socialcli" type="checkbox">
+        <span>Maigret/Sherlock local</span>
+        <em>sans clé · nécessite installation CLI</em>
+      </label>
+      <label class="oscx-toggle">
+        <input id="oscx-brixhub" type="checkbox" onchange="toggleBrixHubBox()">
+        <span>Inclure BrixHub API</span>
+        <em>POST <code>/api/v1/search</code>, JSON, header <code>X-API-Key</code></em>
+      </label>
+    </div>
+
+
+    <div id="oscx-linkedin-box" class="oscx-card" style="display:none;margin-top:10px">
+      <div class="oscx-card-title">💼 LinkedIn via RapidAPI</div>
+      <div class="oscx-grid">
+        <div class="oscx-k">URL LinkedIn</div>
+        <div class="oscx-v"><input id="oscx-li-url" class="oscx-mini-input" placeholder="https://www.linkedin.com/in/username/"></div>
+      </div>
+      <div class="oscx-note">Optionnel : si le champ est vide, le plugin construit une URL LinkedIn à partir du pseudo saisi. La clé RapidAPI reste côté serveur dans <code>.env</code>.</div>
+    </div>
 
     <div id="oscx-brixhub-box" class="oscx-card" style="display:none;margin-top:10px">
       <div class="oscx-card-title">🧩 Critères BrixHub documentés</div>
@@ -42,7 +94,7 @@
       <div class="oscx-note">Optionnel : colle ici un JSON complet BrixHub. Il sera envoyé tel quel après filtrage des champs documentés.</div>
       <textarea id="oscx-bx-json" placeholder='{"nom_famille":"Dupont","prenom":"Jean","ville":"Paris","flexible":true}' style="width:100%;min-height:74px;margin-top:6px;padding:8px;border:1px solid var(--bdr);border-radius:var(--r);background:var(--bg3);color:var(--tx);font-family:var(--mono);font-size:12px"></textarea>
     </div>
-    <div class="oscx-note">⚖️ À utiliser uniquement pour des recherches autorisées. Le plugin n'appelle plus d'autres endpoints BrixHub que celui fourni : <code>POST /api/v1/search</code>.</div>
+    <div class="oscx-note">⚖️ Mode audit défensif : utilisez ces modules uniquement pour vos propres comptes, vos domaines, votre organisation, ou une cible ayant donné son accord. Le plugin n'appelle plus d'autres endpoints BrixHub que celui fourni : <code>POST /api/v1/search</code>. Le score de corrélation reste indicatif : il aide à prioriser les vérifications, mais ne constitue jamais une preuve d’identité. La lecture X utilise seulement le profil public fourni par l'API officielle, si <code>X_BEARER_TOKEN</code> est configuré côté serveur. LinkedIn/RapidAPI est optionnel et doit rester limité à un usage consenti ou défensif.</div>
   </div>
 
   <div id="oscx-progress" style="display:none">

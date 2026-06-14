@@ -1,7 +1,7 @@
 {
   "name": "OSINT Cross-Reference",
-  "version": "1.3",
-  "description": "Recherche OSINT multi-source compatible Second Brain : pseudonyme, email, téléphone, IP et domaine, avec intégration optionnelle BrixHub v1 via X-API-Key serveur.",
+  "version": "1.7.0",
+  "description": "Recherche OSINT multi-source en mode audit défensif : score de corrélation, GitHub public, Wikidata, API Entreprises, Reddit public, Maigret/Sherlock local, BrixHub optionnel et X API.",
   "author": "HackerAI / adaptation Second Brain",
   "buttons": [
     {
